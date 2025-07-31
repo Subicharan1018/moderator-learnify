@@ -1,92 +1,110 @@
-// content.js
-
-// This function is responsible for creating and inserting the 'Save Link' button.
 function createAndInsertButton() {
-    // UPDATED SELECTOR for the latest YouTube layout.
-    // This targets the container holding the like, share, and download buttons.
-    const targetContainer = document.querySelector("#actions-inner");
-
-    // Check if the target container exists and if our button hasn't been added yet.
-    if (targetContainer && !document.getElementById('custom-save-link-button')) {
-        console.log("Target container found. Creating button.");
-
-        // Create the button element itself
+    const targetContainer = document.querySelector("ytd-watch-metadata #top-level-buttons-computed");
+    if (targetContainer && !document.getElementById('custom-save-link-button-wrapper')) {
+        // Main button
         const saveButton = document.createElement('button');
         saveButton.id = 'custom-save-link-button';
         saveButton.textContent = 'Save Link';
 
-        // Apply styling to the button to make it look like YouTube's buttons
-        Object.assign(saveButton.style, {
-            backgroundColor: 'rgba(255, 255, 255, 0.1)',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '18px',
-            padding: '9px 16px',
-            cursor: 'pointer',
-            fontFamily: '"Roboto", "Arial", sans-serif',
-            fontSize: '14px',
-            fontWeight: '500',
-            transition: 'background-color 0.3s'
+        // Iconic Youtube-alignment via flex settings and margins in wrapper
+        const buttonWrapper = document.createElement('div');
+        buttonWrapper.id = 'custom-save-link-button-wrapper';
+        Object.assign(buttonWrapper.style, {
+            display: 'flex',
+            alignItems: 'center',
+            marginRight: '4px',
+            height: '100%',
+            padding: '0'
         });
 
-        // Add a hover effect for better user experience.
-        saveButton.onmouseover = () => saveButton.style.backgroundColor = 'rgba(255, 255, 255, 0.2)';
-        saveButton.onmouseout = () => saveButton.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+        // Bleeding animated red border using CSS class
+        const style = document.createElement('style');
+        style.textContent = `
+        #custom-save-link-button {
+            position: relative;
+            background: rgba(30,30,30,1);
+            color: #fff;
+            border: none;
+            border-radius: 18px;
+            padding: 8px 16px;
+            min-height: 32px;
+            min-width: 48px;
+            cursor: pointer;
+            font-family: "Roboto", "Arial", sans-serif;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 1;
+            overflow: hidden;
+        }
+        #custom-save-link-button::before {
+            content: "";
+            position: absolute;
+            top: -3px; left: -3px; right: -3px; bottom: -3px;
+            border-radius: 20px;
+            border: 2.5px solid #ff2c2c;
+            box-shadow: 0 0 10px 2px #f00, 0 0 40px 6px rgba(255,0,0,0.4);
+            z-index: 0;
+            opacity: 0.75;
+            pointer-events: none;
+            animation: bleed-pulse 1.7s infinite alternate cubic-bezier(.68,-0.55,.27,1.55);
+        }
+        @keyframes bleed-pulse {
+            0%   { box-shadow: 0 0 15px 2px #ff2424, 0 0 30px 6px rgba(255,0,0,0.3);}
+            50%  { box-shadow: 0 0 35px 6px #ff0033, 0 0 60px 10px rgba(255,0,0,0.7);}
+            100% { box-shadow: 0 0 15px 2px #ff4242, 0 0 30px 6px rgba(255,0,0,0.2);}
+        }
+        #custom-save-link-button:disabled {opacity: 0.7;}
+        #custom-save-link-button:hover::before {
+            box-shadow: 0 0 20px 3px #ff2929, 0 0 70px 14px rgba(255,0,0,0.8);
+            transition: box-shadow 0.25s;
+        }
+        #custom-save-link-button span {
+            position: relative;
+            z-index: 2;
+        }
+        `;
 
-        // This is the main action: what happens when the button is clicked.
+        // Insert `<span>` for text for proper stacking
+        const span = document.createElement('span');
+        span.textContent = 'Save Link';
+        saveButton.textContent = '';
+        saveButton.appendChild(span);
+
+        // Save functionality as before
         saveButton.addEventListener('click', () => {
             const videoUrl = window.location.href;
-            console.log('Save button clicked. Sending URL:', videoUrl);
-
-            // Temporarily disable the button to prevent multiple clicks.
             saveButton.disabled = true;
-            saveButton.textContent = 'Saving...';
+            span.textContent = 'Saving...';
 
-            // Send a message to the background script (background.js).
             chrome.runtime.sendMessage({ action: 'saveLink', url: videoUrl }, (response) => {
-                // This is a callback function that runs after the background script responds.
                 if (response && response.status === 'success') {
-                    console.log('Successfully saved link.');
-                    saveButton.textContent = 'Saved!';
+                    span.textContent = 'Saved!';
                 } else {
-                    console.error('Failed to save link:', response ? response.message : 'No response');
-                    saveButton.textContent = 'Error!';
+                    span.textContent = 'Error!';
                 }
-
-                // Revert the button text after 2 seconds and re-enable it.
                 setTimeout(() => {
-                    saveButton.textContent = 'Save Link';
+                    span.textContent = 'Save Link';
                     saveButton.disabled = false;
                 }, 2000);
             });
         });
 
-        // Create a wrapper for our button to match YouTube's layout structure.
-        // This ensures our button fits into the horizontal row correctly.
-        const buttonWrapper = document.createElement('div');
-        buttonWrapper.style.marginRight = '8px'; // Adds spacing between our button and the next one.
+        // Put everything together
         buttonWrapper.appendChild(saveButton);
-
-        // Insert the wrapper (which contains our button) into the target container.
         targetContainer.prepend(buttonWrapper);
+
+        // Only add the style once
+        if (!document.getElementById('bleeding-border-style')) {
+            style.id = 'bleeding-border-style';
+            document.head.appendChild(style);
+        }
     }
 }
 
-// YouTube's page is a single-page application (SPA), meaning content loads
-// dynamically without full page reloads. A MutationObserver is the robust
-// way to detect when new elements (like the video player) are added to the page.
-const observer = new MutationObserver((mutations) => {
-    // We loop through the mutations, but really we just need to know that *something* changed.
-    // We can then try to find our target container and add the button.
+// SPA support
+const observer = new MutationObserver(() => {
     createAndInsertButton();
 });
 
-// Start observing the entire document body for changes to its direct children or entire subtree.
-observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-});
-
-// Finally, call the function once on initial script injection, just in case
-// the elements are already present when the script loads.
+observer.observe(document.body, { childList: true, subtree: true });
 createAndInsertButton();

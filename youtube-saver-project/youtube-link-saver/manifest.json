@@ -2,20 +2,22 @@
   "manifest_version": 3,
   "name": "YouTube Link Saver",
   "version": "1.0",
-  "description": "Adds a button to save the current YouTube video link to a local file.",
+  "description": "Save YouTube links with metadata.",
   "permissions": [
-    "activeTab"
+    "scripting",
+    "activeTab",
+    "tabs"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/watch*"],
+      "matches": ["*://www.youtube.com/*"],
       "js": ["content.js"]
     }
   ],
   "host_permissions": [
-    "http://localhost:3000/*"
+    "*://www.youtube.com/*"
   ]
 }

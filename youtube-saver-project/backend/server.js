@@ -1,28 +1,27 @@
-// server.js
-
 // --- Imports ---
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const YtDlpWrap = require('yt-dlp-wrap').default;
+const path = require('path');
 
 // --- Initializations ---
 const app = express();
 const port = 3000;
-const ytDlpWrap = new YtDlpWrap();
+
+// Explicitly provide the full path to yt-dlp binary inside your venv
+const ytDlpBinary = path.join(__dirname, '.yt-fetch', 'bin', 'yt-dlp');
+const ytDlpWrap = new YtDlpWrap(ytDlpBinary);
 
 // --- MongoDB Connection ---
-// IMPORTANT: Replace this with your own MongoDB connection string.
-// You can get one for free from MongoDB Atlas.
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/youtube-links';
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log('Successfully connected to MongoDB.'))
     .catch(err => console.error('MongoDB connection error:', err));
 
-
-// --- Mongoose Schema (Expanded as per your request) ---
+// --- Mongoose Schema ---
 const VideoSchema = new mongoose.Schema({
     video_id: { type: String, required: true, unique: true },
     title: { type: String, required: true },
@@ -90,11 +89,9 @@ const VideoSchema = new mongoose.Schema({
 
 const Video = mongoose.model('Video', VideoSchema);
 
-
 // --- Middleware ---
 app.use(cors());
 app.use(bodyParser.json());
-
 
 // --- API Endpoint ---
 app.post('/save-link', async (req, res) => {
@@ -105,23 +102,18 @@ app.post('/save-link', async (req, res) => {
 
     try {
         console.log(`Fetching metadata for URL: ${url}`);
-        // 1. Fetch metadata using yt-dlp
+
         const metadata = await ytDlpWrap.getVideoInfo(url);
 
-        // 2. Format the data to match our expanded schema
         const duration_seconds = metadata.duration || 0;
         const hours = Math.floor(duration_seconds / 3600);
         const minutes = Math.floor((duration_seconds % 3600) / 60);
         const seconds = Math.floor(duration_seconds % 60);
+        const durationFormatted = hours > 0
+            ? `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+            : `${minutes}:${seconds.toString().padStart(2, '0')}`;
 
-        let durationFormatted = '';
-        if (hours > 0) {
-            durationFormatted = `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-        } else {
-            durationFormatted = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-        }
-
-        const isApproved = true; // Set approval status
+        const isApproved = true;
 
         const videoData = {
             video_id: metadata.id,
@@ -132,7 +124,9 @@ app.post('/save-link', async (req, res) => {
             thumbnail: metadata.thumbnail,
             duration: durationFormatted,
             views: (metadata.view_count || 0).toLocaleString(),
-            upload_date: metadata.upload_date ? `${metadata.upload_date.slice(0, 4)}-${metadata.upload_date.slice(4, 6)}-${metadata.upload_date.slice(6, 8)}` : new Date().toISOString().split('T')[0],
+            upload_date: metadata.upload_date
+                ? `${metadata.upload_date.slice(0, 4)}-${metadata.upload_date.slice(4, 6)}-${metadata.upload_date.slice(6, 8)}`
+                : new Date().toISOString().split('T')[0],
             description: metadata.description,
             channel: {
                 name: metadata.channel,
@@ -152,10 +146,8 @@ app.post('/save-link', async (req, res) => {
             approved_by: isApproved ? "admin@protube.com" : null,
             approved_at: isApproved ? new Date() : null,
             last_updated: new Date()
-            // player_settings, safety_overrides, etc., will use default values from the schema
         };
 
-        // 3. Save to MongoDB using findOneAndUpdate with 'upsert'
         const savedVideo = await Video.findOneAndUpdate(
             { video_id: videoData.video_id },
             videoData,
@@ -170,7 +162,6 @@ app.post('/save-link', async (req, res) => {
         res.status(500).json({ status: 'error', message: 'Failed to process link.', error: error.message });
     }
 });
-
 
 // --- Start Server ---
 app.listen(port, () => {
