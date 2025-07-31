@@ -1,0 +1,16 @@
+{
+  "name": "youtube-link-saver-backend-mongo",
+  "version": "1.0.0",
+  "description": "A server to extract YouTube metadata and save it to MongoDB.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.4.1",
+    "yt-dlp-wrap": "^2.3.12"
+  }
+}
