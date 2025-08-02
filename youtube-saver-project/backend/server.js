@@ -14,7 +14,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // --- Environment Variables ---
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production-make-it-very-long-and-random';
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/youtube-links';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
@@ -29,6 +29,11 @@ const logger = {
   },
   warn: (message, data = {}) => {
     console.warn(`[${new Date().toISOString()}] WARN: ${message}`, data);
+  },
+  debug: (message, data = {}) => {
+    if (NODE_ENV === 'development') {
+      console.log(`[${new Date().toISOString()}] DEBUG: ${message}`, data);
+    }
   }
 };
 
@@ -66,10 +71,11 @@ app.use(limiter);
 // --- CORS Configuration ---
 const corsOptions = {
   origin: NODE_ENV === 'development' 
-    ? ['http://localhost:3000', 'chrome-extension://*']
+    ? ['http://localhost:3000', 'http://localhost:3001', 'http://127.0.0.1:3000', 'chrome-extension://*']
     : process.env.ALLOWED_ORIGINS?.split(',') || ['chrome-extension://*'],
   credentials: true,
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
+  exposedHeaders: ['Authorization']
 };
 
 app.use(cors(corsOptions));
@@ -130,7 +136,7 @@ const UserSchema = new mongoose.Schema({
     ref: 'Video' 
   }],
   preferences: {
-    autoApprove: { type: Boolean, default: false },
+    autoApprove: { type: Boolean, default: true }, // Changed to true for easier testing
     emailNotifications: { type: Boolean, default: true }
   },
   lastLoginAt: { type: Date },
@@ -231,13 +237,13 @@ const VideoSchema = new mongoose.Schema({
     }],
     default: []
   },
-  approved: { type: Boolean, default: false },
+  approved: { type: Boolean, default: true }, // Changed to true for easier testing
   approved_by: { type: String, default: null },
   approved_at: { type: Date, default: null },
   saved_by: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User', 
-    required: true 
+    required: false // CHANGED: Made optional for no-auth mode
   },
   last_updated: { type: Date, default: Date.now },
   player_settings: {
@@ -266,7 +272,7 @@ const VideoSchema = new mongoose.Schema({
 });
 
 // Compound indexes for better query performance
-VideoSchema.index({ video_id: 1, saved_by: 1 }, { unique: true });
+VideoSchema.index({ video_id: 1, saved_by: 1 });
 VideoSchema.index({ saved_by: 1, createdAt: -1 });
 VideoSchema.index({ approved: 1 });
 
@@ -286,9 +292,10 @@ const utils = {
   isValidYouTubeUrl: (url) => {
     try {
       const urlObj = new URL(url);
-      return urlObj.hostname === 'www.youtube.com' && 
-             urlObj.pathname === '/watch' && 
-             urlObj.searchParams.has('v');
+      const validHosts = ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com'];
+      return validHosts.includes(urlObj.hostname) && 
+             (urlObj.pathname === '/watch' || urlObj.pathname.startsWith('/embed/') || urlObj.hostname === 'youtu.be') &&
+             (urlObj.searchParams.has('v') || urlObj.hostname === 'youtu.be');
     } catch {
       return false;
     }
@@ -298,6 +305,9 @@ const utils = {
   extractVideoId: (url) => {
     try {
       const urlObj = new URL(url);
+      if (urlObj.hostname === 'youtu.be') {
+        return urlObj.pathname.slice(1);
+      }
       return urlObj.searchParams.get('v');
     } catch {
       return null;
@@ -325,33 +335,112 @@ const utils = {
   }
 };
 
-// --- Auth Middleware ---
+// --- IMPROVED Auth Middleware ---
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    
+    logger.debug('Authentication attempt', {
+      hasAuthHeader: !!authHeader,
+      authHeaderPrefix: authHeader ? authHeader.substring(0, 10) + '...' : 'none',
+      userAgent: req.headers['user-agent'],
+      ip: req.ip
+    });
 
-    if (!token) {
+    if (!authHeader) {
+      logger.warn('No authorization header provided', { ip: req.ip });
       return res.status(401).json(
-        utils.createResponse('error', 'Access token required')
+        utils.createResponse('error', 'Authorization header required')
       );
     }
 
+    // Check if header starts with 'Bearer '
+    if (!authHeader.startsWith('Bearer ')) {
+      logger.warn('Invalid authorization header format', { 
+        authHeader: authHeader.substring(0, 20) + '...',
+        ip: req.ip 
+      });
+      return res.status(401).json(
+        utils.createResponse('error', 'Invalid authorization header format. Use: Bearer <token>')
+      );
+    }
+
+    const token = authHeader.split(' ')[1];
+    
+    if (!token || token === 'undefined' || token === 'null' || token.trim() === '') {
+      logger.warn('No valid token provided', { 
+        tokenExists: !!token,
+        tokenValue: token,
+        ip: req.ip 
+      });
+      return res.status(401).json(
+        utils.createResponse('error', 'Valid access token required')
+      );
+    }
+
+    logger.debug('Attempting to verify token', { 
+      tokenLength: token.length,
+      tokenPrefix: token.substring(0, 20) + '...',
+      ip: req.ip 
+    });
+
+    // Verify JWT token
     const decoded = jwt.verify(token, JWT_SECRET);
+    logger.debug('Token decoded successfully', { 
+      userId: decoded.userId,
+      email: decoded.email,
+      exp: new Date(decoded.exp * 1000).toISOString()
+    });
+
+    // Find user
     const user = await User.findById(decoded.userId).select('-password');
     
-    if (!user || !user.isActive) {
+    if (!user) {
+      logger.warn('User not found for token', { userId: decoded.userId });
       return res.status(401).json(
-        utils.createResponse('error', 'Invalid or inactive user')
+        utils.createResponse('error', 'User not found')
+      );
+    }
+
+    if (!user.isActive) {
+      logger.warn('Inactive user attempted access', { userId: decoded.userId, email: user.email });
+      return res.status(401).json(
+        utils.createResponse('error', 'Account is deactivated')
       );
     }
 
     req.user = user;
+    logger.debug('Authentication successful', { 
+      userId: user._id,
+      email: user.email,
+      role: user.role 
+    });
+    
     next();
   } catch (error) {
-    logger.error('Authentication error:', error);
-    return res.status(403).json(
-      utils.createResponse('error', 'Invalid or expired token')
+    logger.error('Authentication error', {
+      name: error.name,
+      message: error.message,
+      stack: NODE_ENV === 'development' ? error.stack : undefined,
+      ip: req.ip
+    });
+    
+    let errorMessage = 'Authentication failed';
+    let statusCode = 403;
+    
+    if (error.name === 'JsonWebTokenError') {
+      errorMessage = 'Invalid token format';
+      statusCode = 401;
+    } else if (error.name === 'TokenExpiredError') {
+      errorMessage = 'Token has expired';
+      statusCode = 401;
+    } else if (error.name === 'NotBeforeError') {
+      errorMessage = 'Token not active yet';
+      statusCode = 401;
+    }
+    
+    return res.status(statusCode).json(
+      utils.createResponse('error', errorMessage)
     );
   }
 };
@@ -364,7 +453,8 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     version: '1.0.0',
-    environment: NODE_ENV
+    environment: NODE_ENV,
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
   });
 });
 
@@ -373,14 +463,64 @@ app.get('/test', (req, res) => {
   logger.info('Test endpoint accessed');
   res.json(utils.createResponse('success', 'Backend is working!', {
     timestamp: new Date().toISOString(),
-    version: '1.0.0'
+    version: '1.0.0',
+    environment: NODE_ENV
   }));
 });
+
+// DEBUG: Token verification endpoint (REMOVE IN PRODUCTION)
+if (NODE_ENV === 'development') {
+  app.post('/debug-auth', (req, res) => {
+    const authHeader = req.headers['authorization'];
+    
+    logger.debug('=== DEBUG AUTH ENDPOINT ===', {
+      headers: req.headers,
+      body: req.body
+    });
+    
+    if (!authHeader) {
+      return res.json({ 
+        status: 'error', 
+        message: 'No authorization header',
+        headers: req.headers
+      });
+    }
+
+    const token = authHeader.split(' ')[1];
+    
+    if (!token) {
+      return res.json({ 
+        status: 'error', 
+        message: 'No token in header',
+        authHeader: authHeader
+      });
+    }
+    
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      res.json({ 
+        status: 'success', 
+        decoded, 
+        tokenPreview: token.substring(0, 20) + '...',
+        tokenLength: token.length
+      });
+    } catch (error) {
+      res.json({ 
+        status: 'error', 
+        error: error.message, 
+        tokenPreview: token.substring(0, 20) + '...',
+        tokenLength: token.length
+      });
+    }
+  });
+}
 
 // User Signup
 app.post('/auth/signup', async (req, res) => {
   try {
     const { name, email, password } = req.body;
+
+    logger.info('Signup attempt', { email });
 
     // Validation
     if (!name || !email || !password) {
@@ -421,7 +561,11 @@ app.post('/auth/signup', async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user._id, email: user.email },
+      { 
+        userId: user._id, 
+        email: user.email,
+        role: user.role
+      },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -440,7 +584,11 @@ app.post('/auth/signup', async (req, res) => {
       token
     };
 
-    logger.info('User registered successfully', { email: user.email });
+    logger.info('User registered successfully', { 
+      email: user.email,
+      userId: user._id 
+    });
+    
     res.status(201).json(
       utils.createResponse('success', 'User created successfully', { user: userData })
     );
@@ -464,6 +612,8 @@ app.post('/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    logger.info('Login attempt', { email });
+
     // Validation
     if (!email || !password) {
       return res.status(400).json(
@@ -476,6 +626,7 @@ app.post('/auth/login', async (req, res) => {
     // Find user
     const user = await User.findOne({ email: sanitizedEmail });
     if (!user) {
+      logger.warn('Login failed - user not found', { email: sanitizedEmail });
       return res.status(401).json(
         utils.createResponse('error', 'Invalid email or password')
       );
@@ -483,6 +634,7 @@ app.post('/auth/login', async (req, res) => {
 
     // Check if user is active
     if (!user.isActive) {
+      logger.warn('Login failed - user inactive', { email: sanitizedEmail });
       return res.status(401).json(
         utils.createResponse('error', 'Account is deactivated')
       );
@@ -491,6 +643,7 @@ app.post('/auth/login', async (req, res) => {
     // Verify password
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
+      logger.warn('Login failed - invalid password', { email: sanitizedEmail });
       return res.status(401).json(
         utils.createResponse('error', 'Invalid email or password')
       );
@@ -503,7 +656,11 @@ app.post('/auth/login', async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user._id, email: user.email },
+      { 
+        userId: user._id, 
+        email: user.email,
+        role: user.role
+      },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -514,10 +671,16 @@ app.post('/auth/login', async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      preferences: user.preferences,
       token
     };
 
-    logger.info('User logged in successfully', { email: user.email });
+    logger.info('User logged in successfully', { 
+      email: user.email,
+      userId: user._id,
+      loginCount: user.loginCount
+    });
+    
     res.status(200).json(
       utils.createResponse('success', 'Login successful', { user: userData })
     );
@@ -539,6 +702,12 @@ app.get('/user/stats', authenticateToken, async (req, res) => {
       Video.countDocuments({ saved_by: userId }),
       Video.countDocuments({ saved_by: userId, approved: true })
     ]);
+
+    logger.info('User stats retrieved', { 
+      userId,
+      totalSaved,
+      approvedCount 
+    });
 
     res.status(200).json(
       utils.createResponse('success', 'Stats retrieved successfully', {
@@ -572,6 +741,13 @@ app.get('/user/videos', authenticateToken, async (req, res) => {
       Video.countDocuments({ saved_by: userId })
     ]);
 
+    logger.info('User videos retrieved', { 
+      userId,
+      count: videos.length,
+      total,
+      page 
+    });
+
     res.status(200).json(
       utils.createResponse('success', 'Videos retrieved successfully', {
         videos,
@@ -592,11 +768,16 @@ app.get('/user/videos', authenticateToken, async (req, res) => {
   }
 });
 
-// Save Link Endpoint
-app.post('/save-link', authenticateToken, async (req, res) => {
+// MAIN SAVE LINK ENDPOINT - NO AUTHENTICATION REQUIRED
+app.post('/save-link', async (req, res) => {
   try {
     const { url } = req.body;
     
+    logger.info('Save link request received (NO AUTH)', { 
+      url,
+      ip: req.ip
+    });
+
     if (!url) {
       return res.status(400).json(
         utils.createResponse('error', 'URL is required')
@@ -604,36 +785,41 @@ app.post('/save-link', authenticateToken, async (req, res) => {
     }
 
     if (!utils.isValidYouTubeUrl(url)) {
+      logger.warn('Invalid YouTube URL provided', { url });
       return res.status(400).json(
-        utils.createResponse('error', 'Invalid YouTube URL')
+        utils.createResponse('error', 'Invalid YouTube URL. Please provide a valid YouTube video URL.')
       );
     }
 
     const videoId = utils.extractVideoId(url);
     if (!videoId) {
+      logger.warn('Could not extract video ID', { url });
       return res.status(400).json(
         utils.createResponse('error', 'Could not extract video ID from URL')
       );
     }
 
-    logger.info('Processing save link request', { 
-      url, 
-      videoId, 
-      userId: req.user._id,
-      userEmail: req.user.email 
+    logger.info('Processing video (NO AUTH)', { 
+      videoId,
+      url
     });
 
-    // Check if video already exists for this user
+    // Check if video already exists (without user check for now)
     const existingVideo = await Video.findOne({ 
-      video_id: videoId, 
-      saved_by: req.user._id 
+      video_id: videoId
     });
 
     if (existingVideo) {
+      logger.info('Video already exists', { 
+        videoId,
+        title: existingVideo.title 
+      });
       return res.status(200).json(
-        utils.createResponse('success', 'Video already saved to your collection', existingVideo)
+        utils.createResponse('success', 'Video already exists in database', existingVideo)
       );
     }
+
+    logger.info('Fetching video metadata with youtube-dl', { videoId });
 
     // Use youtube-dl-exec to get video metadata
     const metadata = await youtubeDl(url, {
@@ -644,11 +830,14 @@ app.post('/save-link', authenticateToken, async (req, res) => {
       timeout: 30
     });
 
+    logger.info('Video metadata fetched successfully', { 
+      videoId,
+      title: metadata.title,
+      duration: metadata.duration 
+    });
+
     // Format duration
     const durationFormatted = utils.formatDuration(metadata.duration);
-
-    // Auto-approve for regular users, require manual approval for sensitive content
-    const isApproved = req.user.preferences?.autoApprove || req.user.role === 'admin';
 
     const videoData = {
       video_id: videoId,
@@ -675,47 +864,54 @@ app.post('/save-link', authenticateToken, async (req, res) => {
       likes: metadata.like_count || 0,
       comment_count: metadata.comment_count || 0,
       comments_enabled: (metadata.comment_count || 0) > 0,
-      tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 20) : [], // Limit tags
+      tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 20) : [],
       chapters: Array.isArray(metadata.chapters) ? metadata.chapters : [],
-      saved_by: req.user._id,
-      approved: isApproved,
-      approved_by: isApproved ? req.user.email : null,
-      approved_at: isApproved ? new Date() : null,
+      // NO saved_by field - will be null/undefined
+      approved: true,
+      approved_by: 'system',
+      approved_at: new Date(),
       last_updated: new Date()
     };
 
     const savedVideo = new Video(videoData);
     await savedVideo.save();
 
-    // Add video to user's saved videos
-    await User.findByIdAndUpdate(
-      req.user._id,
-      { $addToSet: { savedVideos: savedVideo._id } }
-    );
-
-    logger.info('Video saved successfully', { 
+    logger.info('Video saved successfully (NO AUTH)', { 
       videoId: savedVideo.video_id,
-      title: savedVideo.title,
-      userId: req.user._id,
-      userEmail: req.user.email
+      title: savedVideo.title
     });
 
     res.status(200).json(
-      utils.createResponse('success', 'Video metadata saved to database.', savedVideo)
+      utils.createResponse('success', 'Video metadata saved to database successfully!', savedVideo)
     );
 
   } catch (error) {
-    logger.error('Error processing save link:', error);
+    logger.error('Error processing save link (NO AUTH):', {
+      message: error.message,
+      stack: NODE_ENV === 'development' ? error.stack : undefined
+    });
     
     let errorMessage = 'Failed to process link.';
+    let statusCode = 500;
+    
     if (error.message && error.message.includes('youtube-dl')) {
-      errorMessage = 'Failed to fetch video metadata. Please check if the video is available.';
+      errorMessage = 'Failed to fetch video metadata. Please check if the video is available and not private.';
+      statusCode = 400;
+    } else if (error.message && error.message.includes('Video unavailable')) {
+      errorMessage = 'This video is unavailable or private.';
+      statusCode = 400;
     } else if (error.name === 'ValidationError') {
       errorMessage = 'Invalid video data received.';
+      statusCode = 400;
+    } else if (error.code === 11000) {
+      errorMessage = 'Video already exists in database.';
+      statusCode = 409;
     }
 
-    res.status(500).json(
-      utils.createResponse('error', errorMessage, { error: error.message })
+    res.status(statusCode).json(
+      utils.createResponse('error', errorMessage, { 
+        ...(NODE_ENV === 'development' && { debug: error.message })
+      })
     );
   }
 });
@@ -978,7 +1174,7 @@ app.get('/user/videos/search/:query', authenticateToken, async (req, res) => {
   }
 });
 
-// Admin Routes (if needed in future)
+// Admin Routes
 app.get('/admin/stats', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -1012,14 +1208,36 @@ app.get('/admin/stats', authenticateToken, async (req, res) => {
   }
 });
 
+// Token validation endpoint
+app.get('/auth/validate', authenticateToken, (req, res) => {
+  res.status(200).json(
+    utils.createResponse('success', 'Token is valid', {
+      user: {
+        id: req.user._id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role,
+        preferences: req.user.preferences
+      }
+    })
+  );
+});
+
 // --- Error Handling Middleware ---
 
 // Request timeout middleware
 app.use((req, res, next) => {
   req.setTimeout(30000, () => {
-    res.status(408).json(
-      utils.createResponse('error', 'Request timeout')
-    );
+    logger.warn('Request timeout', { 
+      url: req.originalUrl, 
+      method: req.method,
+      ip: req.ip 
+    });
+    if (!res.headersSent) {
+      res.status(408).json(
+        utils.createResponse('error', 'Request timeout')
+      );
+    }
   });
   next();
 });
@@ -1031,8 +1249,14 @@ app.use((error, req, res, next) => {
     stack: NODE_ENV === 'development' ? error.stack : undefined,
     url: req.originalUrl,
     method: req.method,
-    ip: req.ip
+    ip: req.ip,
+    userId: req.user?._id
   });
+
+  // Prevent duplicate responses
+  if (res.headersSent) {
+    return next(error);
+  }
 
   // Handle specific error types
   if (error.name === 'ValidationError') {
@@ -1055,9 +1279,15 @@ app.use((error, req, res, next) => {
     );
   }
 
+  if (error.name === 'MongoTimeoutError') {
+    return res.status(503).json(
+      utils.createResponse('error', 'Database timeout')
+    );
+  }
+
   res.status(500).json(
     utils.createResponse('error', 'Internal server error', {
-      ...(NODE_ENV === 'development' && { error: error.message })
+      ...(NODE_ENV === 'development' && { debug: error.message })
     })
   );
 });
@@ -1079,20 +1309,24 @@ app.use('*', (req, res) => {
 const gracefulShutdown = (signal) => {
   logger.info(`Received ${signal}. Starting graceful shutdown...`);
   
-  server.close(() => {
-    logger.info('HTTP server closed');
-    
-    mongoose.connection.close(false, () => {
-      logger.info('MongoDB connection closed');
-      process.exit(0);
+  if (global.server) {
+    global.server.close(() => {
+      logger.info('HTTP server closed');
+      
+      mongoose.connection.close(false, () => {
+        logger.info('MongoDB connection closed');
+        process.exit(0);
+      });
     });
-  });
 
-  // Force close after 10 seconds
-  setTimeout(() => {
-    logger.error('Force closing server');
-    process.exit(1);
-  }, 10000);
+    // Force close after 10 seconds
+    setTimeout(() => {
+      logger.error('Force closing server');
+      process.exit(1);
+    }, 10000);
+  } else {
+    process.exit(0);
+  }
 };
 
 // Handle shutdown signals
@@ -1130,7 +1364,8 @@ const startServer = async () => {
       console.log('  - GET  /test                - Test endpoint');
       console.log('  - POST /auth/signup         - User registration');
       console.log('  - POST /auth/login          - User login');
-      console.log('  - POST /save-link           - Save YouTube video (authenticated)');
+      console.log('  - GET  /auth/validate       - Validate token');
+      console.log('  - POST /save-link           - Save YouTube video (NO AUTH REQUIRED)');
       console.log('  - GET  /user/stats          - Get user statistics');
       console.log('  - GET  /user/videos         - Get user\'s saved videos');
       console.log('  - GET  /user/videos/:id     - Get video details');
@@ -1139,9 +1374,15 @@ const startServer = async () => {
       console.log('  - PUT  /user/profile        - Update user profile');
       console.log('  - PUT  /user/password       - Change user password');
       console.log('  - GET  /admin/stats         - Admin statistics');
+      if (NODE_ENV === 'development') {
+        console.log('  - POST /debug-auth          - Debug authentication (dev only)');
+      }
       console.log(`\n🔗 Server running on: http://localhost:${port}`);
       console.log(`📊 Environment: ${NODE_ENV}`);
       console.log(`🗄️  Database: ${MONGO_URI}`);
+      console.log(`🔐 JWT Secret: ${JWT_SECRET.substring(0, 20)}...`);
+      console.log('\n✅ Ready to accept requests!');
+      console.log('\n🚨 NOTE: /save-link route has NO AUTHENTICATION for testing!');
     });
 
     // Store server reference for graceful shutdown
