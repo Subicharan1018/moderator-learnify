@@ -2,11 +2,16 @@
   "manifest_version": 3,
   "name": "YouTube Link Saver",
   "version": "1.0",
-  "description": "Save YouTube links with metadata.",
+  "description": "Save YouTube links with metadata to your personal collection.",
   "permissions": [
     "scripting",
     "activeTab",
-    "tabs"
+    "tabs",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://www.youtube.com/*",
+    "http://localhost:3000/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -14,10 +19,18 @@
   "content_scripts": [
     {
       "matches": ["*://www.youtube.com/*"],
-      "js": ["content.js"]
+      "js": ["content.js"],
+      "run_at": "document_end"
     }
   ],
-  "host_permissions": [
-    "*://www.youtube.com/*"
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "YouTube Link Saver"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html"],
+      "matches": ["*://www.youtube.com/*"]
+    }
   ]
 }

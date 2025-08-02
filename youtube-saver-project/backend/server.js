@@ -6,601 +6,1152 @@ const mongoose = require('mongoose');
 const youtubeDl = require('youtube-dl-exec');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 
 // --- Initializations ---
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
-// JWT Secret - In production, use environment variable
+// --- Environment Variables ---
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/youtube-links';
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
+
+// --- Logging Utility ---
+const logger = {
+  info: (message, data = {}) => {
+    console.log(`[${new Date().toISOString()}] INFO: ${message}`, data);
+  },
+  error: (message, error = {}) => {
+    console.error(`[${new Date().toISOString()}] ERROR: ${message}`, error);
+  },
+  warn: (message, data = {}) => {
+    console.warn(`[${new Date().toISOString()}] WARN: ${message}`, data);
+  }
+};
+
+// --- Security Middleware ---
+app.use(helmet({
+  contentSecurityPolicy: false, // Disable for development
+  crossOriginEmbedderPolicy: false
+}));
+
+// --- Rate Limiting ---
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: NODE_ENV === 'development' ? 1000 : 100, // Higher limit for development
+  message: {
+    status: 'error',
+    message: 'Too many requests from this IP, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: NODE_ENV === 'development' ? 50 : 5, // 5 attempts per 15 minutes in production
+  message: {
+    status: 'error',
+    message: 'Too many authentication attempts, please try again later.'
+  },
+  skipSuccessfulRequests: true
+});
+
+app.use('/auth/', authLimiter);
+app.use(limiter);
+
+// --- CORS Configuration ---
+const corsOptions = {
+  origin: NODE_ENV === 'development' 
+    ? ['http://localhost:3000', 'chrome-extension://*']
+    : process.env.ALLOWED_ORIGINS?.split(',') || ['chrome-extension://*'],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+
+// --- Body Parser ---
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
 // --- MongoDB Connection ---
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/youtube-links';
-
-mongoose.connect(MONGO_URI)
-    .then(() => console.log('Successfully connected to MongoDB.'))
-    .catch(err => console.error('MongoDB connection error:', err));
+const connectDB = async () => {
+  try {
+    await mongoose.connect(MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
+    logger.info('Successfully connected to MongoDB');
+  } catch (error) {
+    logger.error('MongoDB connection error:', error);
+    process.exit(1);
+  }
+};
 
 // --- User Schema ---
 const UserSchema = new mongoose.Schema({
-    name: { type: String, required: true },
-    email: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    role: { type: String, enum: ['user', 'admin'], default: 'user' },
-    isActive: { type: Boolean, default: true },
-    savedVideos: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Video' }],
-    preferences: {
-        autoApprove: { type: Boolean, default: false },
-        emailNotifications: { type: Boolean, default: true }
-    }
-}, { timestamps: true });
+  name: { 
+    type: String, 
+    required: [true, 'Name is required'],
+    trim: true,
+    maxlength: [100, 'Name cannot exceed 100 characters']
+  },
+  email: { 
+    type: String, 
+    required: [true, 'Email is required'],
+    unique: true,
+    lowercase: true,
+    trim: true,
+    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
+  },
+  password: { 
+    type: String, 
+    required: [true, 'Password is required'],
+    minlength: [6, 'Password must be at least 6 characters']
+  },
+  role: { 
+    type: String, 
+    enum: ['user', 'admin'], 
+    default: 'user' 
+  },
+  isActive: { 
+    type: Boolean, 
+    default: true 
+  },
+  savedVideos: [{ 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Video' 
+  }],
+  preferences: {
+    autoApprove: { type: Boolean, default: false },
+    emailNotifications: { type: Boolean, default: true }
+  },
+  lastLoginAt: { type: Date },
+  loginCount: { type: Number, default: 0 }
+}, { 
+  timestamps: true,
+  toJSON: { transform: (doc, ret) => { delete ret.password; return ret; } }
+});
+
+// Index for better query performance
+UserSchema.index({ email: 1 });
+UserSchema.index({ isActive: 1 });
 
 const User = mongoose.model('User', UserSchema);
 
 // --- Updated Video Schema ---
 const VideoSchema = new mongoose.Schema({
-    video_id: { type: String, required: true, unique: true },
-    title: { type: String, required: true },
-    url: { type: String, required: true },
-    embed_url: { type: String, required: true },
-    embed_iframe: { type: String, default: '' },
-    thumbnail: { type: String, required: true, default: 'https://via.placeholder.com/320x180' },
-    duration: { type: String, required: true, default: '0:00' },
-    views: { type: String, required: true, default: '0' },
-    upload_date: { type: String, required: true, default: () => new Date().toISOString().split('T')[0] },
-    description: { type: String, required: true, default: 'No description available' },
-    channel: {
-        name: { type: String, required: true, default: 'Unknown Channel' },
-        url: { type: String, required: true, default: '#' },
-        subscribers: { type: String, required: true, default: '0' },
-        verified: { type: Boolean, default: false },
-        logo: { type: String, required: false, default: 'https://via.placeholder.com/150' }
-    },
-    category: { type: [String], required: true, default: ['Uncategorized'] },
-    age_rating: { type: String, default: 'N/A' },
-    content_flags: {
-        violence: { type: Boolean, default: false },
-        explicit_language: { type: Boolean, default: false },
-        sensitive_topics: { type: Boolean, default: false }
-    },
-    likes: { type: Number, default: 0 },
-    dislikes: { type: Number, default: 0 },
-    comments_enabled: { type: Boolean, default: true },
-    comment_count: { type: Number, default: 0 },
-    tags: { type: [String], default: [] },
-    chapters: {
-        type: [{
-            title: { type: String, required: true },
-            start_time: { type: Number, required: true },
-            end_time: { type: Number, required: true }
-        }],
-        default: []
-    },
-    approved: { type: Boolean, default: false },
-    approved_by: { type: String, default: null },
-    approved_at: { type: Date, default: null },
-    saved_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    last_updated: { type: Date, default: Date.now },
-    player_settings: {
-        autoplay: { type: Boolean, default: false },
-        controls: { type: Boolean, default: true },
-        modestbranding: { type: Boolean, default: true },
-        rel: { type: Number, default: 0 },
-        enablejsapi: { type: Number, default: 1 }
-    },
-    safety_overrides: {
-        disable_comments: { type: Boolean, default: true },
-        hide_suggestions: { type: Boolean, default: true },
-        block_annotations: { type: Boolean, default: true }
-    },
-    restrictions: {
-        block_seek: { type: Boolean, default: false },
-        force_captions: { type: Boolean, default: false },
-        lock_quality: {
-            type: String,
-            enum: ['hd720', 'hd1080', 'highres', 'default', null],
-            default: 'hd720'
-        }
+  video_id: { 
+    type: String, 
+    required: true, 
+    index: true 
+  },
+  title: { 
+    type: String, 
+    required: true,
+    maxlength: [500, 'Title too long']
+  },
+  url: { 
+    type: String, 
+    required: true,
+    match: [/^https?:\/\//, 'Invalid URL format']
+  },
+  embed_url: { 
+    type: String, 
+    required: true 
+  },
+  embed_iframe: { 
+    type: String, 
+    default: '' 
+  },
+  thumbnail: { 
+    type: String, 
+    required: true, 
+    default: 'https://via.placeholder.com/320x180' 
+  },
+  duration: { 
+    type: String, 
+    required: true, 
+    default: '0:00' 
+  },
+  views: { 
+    type: String, 
+    required: true, 
+    default: '0' 
+  },
+  upload_date: { 
+    type: String, 
+    required: true, 
+    default: () => new Date().toISOString().split('T')[0] 
+  },
+  description: { 
+    type: String, 
+    required: true, 
+    default: 'No description available',
+    maxlength: [5000, 'Description too long']
+  },
+  channel: {
+    name: { type: String, required: true, default: 'Unknown Channel' },
+    url: { type: String, required: true, default: '#' },
+    subscribers: { type: String, required: true, default: '0' },
+    verified: { type: Boolean, default: false },
+    logo: { type: String, required: false, default: 'https://via.placeholder.com/150' }
+  },
+  category: { 
+    type: [String], 
+    required: true, 
+    default: ['Uncategorized'] 
+  },
+  age_rating: { 
+    type: String, 
+    default: 'N/A' 
+  },
+  content_flags: {
+    violence: { type: Boolean, default: false },
+    explicit_language: { type: Boolean, default: false },
+    sensitive_topics: { type: Boolean, default: false }
+  },
+  likes: { type: Number, default: 0 },
+  dislikes: { type: Number, default: 0 },
+  comments_enabled: { type: Boolean, default: true },
+  comment_count: { type: Number, default: 0 },
+  tags: { type: [String], default: [] },
+  chapters: {
+    type: [{
+      title: { type: String, required: true },
+      start_time: { type: Number, required: true },
+      end_time: { type: Number, required: true }
+    }],
+    default: []
+  },
+  approved: { type: Boolean, default: false },
+  approved_by: { type: String, default: null },
+  approved_at: { type: Date, default: null },
+  saved_by: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User', 
+    required: true 
+  },
+  last_updated: { type: Date, default: Date.now },
+  player_settings: {
+    autoplay: { type: Boolean, default: false },
+    controls: { type: Boolean, default: true },
+    modestbranding: { type: Boolean, default: true },
+    rel: { type: Number, default: 0 },
+    enablejsapi: { type: Number, default: 1 }
+  },
+  safety_overrides: {
+    disable_comments: { type: Boolean, default: true },
+    hide_suggestions: { type: Boolean, default: true },
+    block_annotations: { type: Boolean, default: true }
+  },
+  restrictions: {
+    block_seek: { type: Boolean, default: false },
+    force_captions: { type: Boolean, default: false },
+    lock_quality: {
+      type: String,
+      enum: ['hd720', 'hd1080', 'highres', 'default', null],
+      default: 'hd720'
     }
-}, { timestamps: true });
+  }
+}, { 
+  timestamps: true 
+});
+
+// Compound indexes for better query performance
+VideoSchema.index({ video_id: 1, saved_by: 1 }, { unique: true });
+VideoSchema.index({ saved_by: 1, createdAt: -1 });
+VideoSchema.index({ approved: 1 });
 
 const Video = mongoose.model('Video', VideoSchema);
 
-// --- Middleware ---
-app.use(cors());
-app.use(bodyParser.json());
+// --- Utility Functions ---
+const utils = {
+  // Create standardized response
+  createResponse: (status, message, data = null, statusCode = 200) => ({
+    status,
+    message,
+    timestamp: new Date().toISOString(),
+    ...(data && { data })
+  }),
 
-// Auth middleware
+  // Validate YouTube URL
+  isValidYouTubeUrl: (url) => {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.hostname === 'www.youtube.com' && 
+             urlObj.pathname === '/watch' && 
+             urlObj.searchParams.has('v');
+    } catch {
+      return false;
+    }
+  },
+
+  // Extract video ID from YouTube URL
+  extractVideoId: (url) => {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.searchParams.get('v');
+    } catch {
+      return null;
+    }
+  },
+
+  // Format duration from seconds
+  formatDuration: (seconds) => {
+    if (!seconds || seconds === 0) return '0:00';
+    
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${secs.toString().padStart(2, '0')}`;
+  },
+
+  // Sanitize text input
+  sanitizeText: (text, maxLength = 1000) => {
+    if (!text) return '';
+    return text.toString().trim().substring(0, maxLength);
+  }
+};
+
+// --- Auth Middleware ---
 const authenticateToken = async (req, res, next) => {
+  try {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
-        return res.status(401).json({ status: 'error', message: 'Access token required' });
+      return res.status(401).json(
+        utils.createResponse('error', 'Access token required')
+      );
     }
 
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const user = await User.findById(decoded.userId).select('-password');
-        
-        if (!user || !user.isActive) {
-            return res.status(401).json({ status: 'error', message: 'Invalid or inactive user' });
-        }
-
-        req.user = user;
-        next();
-    } catch (error) {
-        return res.status(403).json({ status: 'error', message: 'Invalid or expired token' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(decoded.userId).select('-password');
+    
+    if (!user || !user.isActive) {
+      return res.status(401).json(
+        utils.createResponse('error', 'Invalid or inactive user')
+      );
     }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    logger.error('Authentication error:', error);
+    return res.status(403).json(
+      utils.createResponse('error', 'Invalid or expired token')
+    );
+  }
 };
 
-// --- Authentication Endpoints ---
+// --- Routes ---
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0',
+    environment: NODE_ENV
+  });
+});
+
+// Test endpoint
+app.get('/test', (req, res) => {
+  logger.info('Test endpoint accessed');
+  res.json(utils.createResponse('success', 'Backend is working!', {
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
+  }));
+});
 
 // User Signup
 app.post('/auth/signup', async (req, res) => {
-    try {
-        const { name, email, password } = req.body;
+  try {
+    const { name, email, password } = req.body;
 
-        // Validation
-        if (!name || !email || !password) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'Name, email, and password are required' 
-            });
-        }
-
-        if (password.length < 6) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'Password must be at least 6 characters long' 
-            });
-        }
-
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
-        if (existingUser) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'User with this email already exists' 
-            });
-        }
-
-        // Hash password
-        const saltRounds = 10;
-        const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-        // Create user
-        const user = new User({
-            name,
-            email: email.toLowerCase(),
-            password: hashedPassword
-        });
-
-        await user.save();
-
-        // Generate JWT token
-        const token = jwt.sign(
-            { userId: user._id, email: user.email },
-            JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-
-        // Return user data (without password)
-        const userData = {
-            id: user._id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            token
-        };
-
-        res.status(201).json({
-            status: 'success',
-            message: 'User created successfully',
-            user: userData
-        });
-
-    } catch (error) {
-        console.error('Signup error:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Internal server error during signup' 
-        });
+    // Validation
+    if (!name || !email || !password) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Name, email, and password are required')
+      );
     }
+
+    if (password.length < 6) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Password must be at least 6 characters long')
+      );
+    }
+
+    // Sanitize inputs
+    const sanitizedName = utils.sanitizeText(name, 100);
+    const sanitizedEmail = email.toLowerCase().trim();
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: sanitizedEmail });
+    if (existingUser) {
+      return res.status(400).json(
+        utils.createResponse('error', 'User with this email already exists')
+      );
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    // Create user
+    const user = new User({
+      name: sanitizedName,
+      email: sanitizedEmail,
+      password: hashedPassword
+    });
+
+    await user.save();
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user._id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Update login stats
+    user.loginCount = 1;
+    user.lastLoginAt = new Date();
+    await user.save();
+
+    // Return user data (password excluded by schema transform)
+    const userData = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      token
+    };
+
+    logger.info('User registered successfully', { email: user.email });
+    res.status(201).json(
+      utils.createResponse('success', 'User created successfully', { user: userData })
+    );
+
+  } catch (error) {
+    logger.error('Signup error:', error);
+    
+    if (error.name === 'ValidationError') {
+      const message = Object.values(error.errors)[0]?.message || 'Validation failed';
+      return res.status(400).json(utils.createResponse('error', message));
+    }
+
+    res.status(500).json(
+      utils.createResponse('error', 'Internal server error during signup')
+    );
+  }
 });
 
 // User Login
 app.post('/auth/login', async (req, res) => {
-    try {
-        const { email, password } = req.body;
+  try {
+    const { email, password } = req.body;
 
-        // Validation
-        if (!email || !password) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'Email and password are required' 
-            });
-        }
-
-        // Find user
-        const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) {
-            return res.status(401).json({ 
-                status: 'error', 
-                message: 'Invalid email or password' 
-            });
-        }
-
-        // Check if user is active
-        if (!user.isActive) {
-            return res.status(401).json({ 
-                status: 'error', 
-                message: 'Account is deactivated' 
-            });
-        }
-
-        // Verify password
-        const validPassword = await bcrypt.compare(password, user.password);
-        if (!validPassword) {
-            return res.status(401).json({ 
-                status: 'error', 
-                message: 'Invalid email or password' 
-            });
-        }
-
-        // Generate JWT token
-        const token = jwt.sign(
-            { userId: user._id, email: user.email },
-            JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-
-        // Return user data (without password)
-        const userData = {
-            id: user._id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            token
-        };
-
-        res.status(200).json({
-            status: 'success',
-            message: 'Login successful',
-            user: userData
-        });
-
-    } catch (error) {
-        console.error('Login error:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Internal server error during login' 
-        });
+    // Validation
+    if (!email || !password) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Email and password are required')
+      );
     }
+
+    const sanitizedEmail = email.toLowerCase().trim();
+
+    // Find user
+    const user = await User.findOne({ email: sanitizedEmail });
+    if (!user) {
+      return res.status(401).json(
+        utils.createResponse('error', 'Invalid email or password')
+      );
+    }
+
+    // Check if user is active
+    if (!user.isActive) {
+      return res.status(401).json(
+        utils.createResponse('error', 'Account is deactivated')
+      );
+    }
+
+    // Verify password
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) {
+      return res.status(401).json(
+        utils.createResponse('error', 'Invalid email or password')
+      );
+    }
+
+    // Update login stats
+    user.loginCount = (user.loginCount || 0) + 1;
+    user.lastLoginAt = new Date();
+    await user.save();
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user._id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Return user data (password excluded by schema transform)
+    const userData = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      token
+    };
+
+    logger.info('User logged in successfully', { email: user.email });
+    res.status(200).json(
+      utils.createResponse('success', 'Login successful', { user: userData })
+    );
+
+  } catch (error) {
+    logger.error('Login error:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Internal server error during login')
+    );
+  }
 });
 
 // Get User Stats
 app.get('/user/stats', authenticateToken, async (req, res) => {
-    try {
-        const userId = req.user._id;
-        
-        const totalSaved = await Video.countDocuments({ saved_by: userId });
-        const approvedCount = await Video.countDocuments({ 
-            saved_by: userId, 
-            approved: true 
-        });
+  try {
+    const userId = req.user._id;
+    
+    const [totalSaved, approvedCount] = await Promise.all([
+      Video.countDocuments({ saved_by: userId }),
+      Video.countDocuments({ saved_by: userId, approved: true })
+    ]);
 
-        res.status(200).json({
-            status: 'success',
-            savedCount: totalSaved,
-            approvedCount: approvedCount
-        });
+    res.status(200).json(
+      utils.createResponse('success', 'Stats retrieved successfully', {
+        savedCount: totalSaved,
+        approvedCount: approvedCount
+      })
+    );
 
-    } catch (error) {
-        console.error('Error fetching user stats:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Failed to fetch user statistics' 
-        });
-    }
+  } catch (error) {
+    logger.error('Error fetching user stats:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to fetch user statistics')
+    );
+  }
 });
 
 // Get User's Saved Videos
 app.get('/user/videos', authenticateToken, async (req, res) => {
-    try {
-        const userId = req.user._id;
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const skip = (page - 1) * limit;
+  try {
+    const userId = req.user._id;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
 
-        const videos = await Video.find({ saved_by: userId })
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
+    const [videos, total] = await Promise.all([
+      Video.find({ saved_by: userId })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Video.countDocuments({ saved_by: userId })
+    ]);
 
-        const total = await Video.countDocuments({ saved_by: userId });
+    res.status(200).json(
+      utils.createResponse('success', 'Videos retrieved successfully', {
+        videos,
+        pagination: {
+          current: page,
+          total: Math.ceil(total / limit),
+          count: videos.length,
+          totalVideos: total
+        }
+      })
+    );
 
-        res.status(200).json({
-            status: 'success',
-            videos,
-            pagination: {
-                current: page,
-                total: Math.ceil(total / limit),
-                count: videos.length,
-                totalVideos: total
-            }
-        });
-
-    } catch (error) {
-        console.error('Error fetching user videos:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Failed to fetch saved videos' 
-        });
-    }
+  } catch (error) {
+    logger.error('Error fetching user videos:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to fetch saved videos')
+    );
+  }
 });
 
-// --- Updated Save Link Endpoint using youtube-dl-exec ---
+// Save Link Endpoint
 app.post('/save-link', authenticateToken, async (req, res) => {
+  try {
     const { url } = req.body;
+    
     if (!url) {
-        return res.status(400).json({ status: 'error', message: 'URL is required' });
+      return res.status(400).json(
+        utils.createResponse('error', 'URL is required')
+      );
     }
 
-    try {
-        console.log(`Fetching metadata for URL: ${url} by user: ${req.user.email}`);
-
-        // Use youtube-dl-exec to get video metadata
-        const metadata = await youtubeDl(url, {
-            dumpSingleJson: true,
-            noWarnings: true,
-            skipDownload: true,
-            format: 'best[height<=720]'
-        });
-
-        const duration_seconds = metadata.duration || 0;
-        const hours = Math.floor(duration_seconds / 3600);
-        const minutes = Math.floor((duration_seconds % 3600) / 60);
-        const seconds = Math.floor(duration_seconds % 60);
-        const durationFormatted = hours > 0
-            ? `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-            : `${minutes}:${seconds.toString().padStart(2, '0')}`;
-
-        // Auto-approve for regular users, require manual approval for sensitive content
-        const isApproved = req.user.preferences?.autoApprove || req.user.role === 'admin';
-
-        const videoData = {
-            video_id: metadata.id,
-            title: metadata.title || 'Unknown Title',
-            url: metadata.webpage_url || url,
-            embed_url: `https://www.youtube.com/embed/${metadata.id}`,
-            embed_iframe: `<iframe width="560" height="315" src="https://www.youtube.com/embed/${metadata.id}" frameborder="0" allowfullscreen></iframe>`,
-            thumbnail: metadata.thumbnail || metadata.thumbnails?.[0]?.url || 'https://via.placeholder.com/320x180',
-            duration: durationFormatted,
-            views: (metadata.view_count || 0).toLocaleString(),
-            upload_date: metadata.upload_date
-                ? `${metadata.upload_date.slice(0, 4)}-${metadata.upload_date.slice(4, 6)}-${metadata.upload_date.slice(6, 8)}`
-                : new Date().toISOString().split('T')[0],
-            description: metadata.description || 'No description available',
-            channel: {
-                name: metadata.uploader || metadata.channel || 'Unknown Channel',
-                url: metadata.uploader_url || metadata.channel_url || '#',
-                subscribers: (metadata.channel_follower_count || 0).toLocaleString(),
-                verified: metadata.channel_is_verified || false,
-                logo: metadata.uploader_avatar || metadata.channel_thumbnail || 'https://via.placeholder.com/150'
-            },
-            category: metadata.categories || ['Uncategorized'],
-            age_rating: metadata.age_limit > 0 ? `${metadata.age_limit}+` : 'N/A',
-            likes: metadata.like_count || 0,
-            comment_count: metadata.comment_count || 0,
-            comments_enabled: (metadata.comment_count || 0) > 0,
-            tags: metadata.tags || [],
-            chapters: metadata.chapters || [],
-            saved_by: req.user._id,
-            approved: isApproved,
-            approved_by: isApproved ? req.user.email : null,
-            approved_at: isApproved ? new Date() : null,
-            last_updated: new Date()
-        };
-
-        const savedVideo = await Video.findOneAndUpdate(
-            { video_id: videoData.video_id, saved_by: req.user._id },
-            videoData,
-            { new: true, upsert: true }
-        );
-
-        // Add video to user's saved videos if not already there
-        await User.findByIdAndUpdate(
-            req.user._id,
-            { $addToSet: { savedVideos: savedVideo._id } }
-        );
-
-        console.log(`Successfully saved/updated video: ${savedVideo.title} by user: ${req.user.email}`);
-        res.status(200).json({ 
-            status: 'success', 
-            message: 'Video metadata saved to database.', 
-            data: savedVideo 
-        });
-
-    } catch (error) {
-        console.error('Error processing link:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Failed to process link.', 
-            error: error.message 
-        });
+    if (!utils.isValidYouTubeUrl(url)) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Invalid YouTube URL')
+      );
     }
+
+    const videoId = utils.extractVideoId(url);
+    if (!videoId) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Could not extract video ID from URL')
+      );
+    }
+
+    logger.info('Processing save link request', { 
+      url, 
+      videoId, 
+      userId: req.user._id,
+      userEmail: req.user.email 
+    });
+
+    // Check if video already exists for this user
+    const existingVideo = await Video.findOne({ 
+      video_id: videoId, 
+      saved_by: req.user._id 
+    });
+
+    if (existingVideo) {
+      return res.status(200).json(
+        utils.createResponse('success', 'Video already saved to your collection', existingVideo)
+      );
+    }
+
+    // Use youtube-dl-exec to get video metadata
+    const metadata = await youtubeDl(url, {
+      dumpSingleJson: true,
+      noWarnings: true,
+      skipDownload: true,
+      format: 'best[height<=720]',
+      timeout: 30
+    });
+
+    // Format duration
+    const durationFormatted = utils.formatDuration(metadata.duration);
+
+    // Auto-approve for regular users, require manual approval for sensitive content
+    const isApproved = req.user.preferences?.autoApprove || req.user.role === 'admin';
+
+    const videoData = {
+      video_id: videoId,
+      title: utils.sanitizeText(metadata.title || 'Unknown Title', 500),
+      url: metadata.webpage_url || url,
+      embed_url: `https://www.youtube.com/embed/${videoId}`,
+      embed_iframe: `<iframe width="560" height="315" src="https://www.youtube.com/embed/${videoId}" frameborder="0" allowfullscreen></iframe>`,
+      thumbnail: metadata.thumbnail || metadata.thumbnails?.[0]?.url || 'https://via.placeholder.com/320x180',
+      duration: durationFormatted,
+      views: (metadata.view_count || 0).toLocaleString(),
+      upload_date: metadata.upload_date
+        ? `${metadata.upload_date.slice(0, 4)}-${metadata.upload_date.slice(4, 6)}-${metadata.upload_date.slice(6, 8)}`
+        : new Date().toISOString().split('T')[0],
+      description: utils.sanitizeText(metadata.description || 'No description available', 5000),
+      channel: {
+        name: utils.sanitizeText(metadata.uploader || metadata.channel || 'Unknown Channel', 200),
+        url: metadata.uploader_url || metadata.channel_url || '#',
+        subscribers: (metadata.channel_follower_count || 0).toLocaleString(),
+        verified: metadata.channel_is_verified || false,
+        logo: metadata.uploader_avatar || metadata.channel_thumbnail || 'https://via.placeholder.com/150'
+      },
+      category: Array.isArray(metadata.categories) ? metadata.categories : ['Uncategorized'],
+      age_rating: metadata.age_limit > 0 ? `${metadata.age_limit}+` : 'N/A',
+      likes: metadata.like_count || 0,
+      comment_count: metadata.comment_count || 0,
+      comments_enabled: (metadata.comment_count || 0) > 0,
+      tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 20) : [], // Limit tags
+      chapters: Array.isArray(metadata.chapters) ? metadata.chapters : [],
+      saved_by: req.user._id,
+      approved: isApproved,
+      approved_by: isApproved ? req.user.email : null,
+      approved_at: isApproved ? new Date() : null,
+      last_updated: new Date()
+    };
+
+    const savedVideo = new Video(videoData);
+    await savedVideo.save();
+
+    // Add video to user's saved videos
+    await User.findByIdAndUpdate(
+      req.user._id,
+      { $addToSet: { savedVideos: savedVideo._id } }
+    );
+
+    logger.info('Video saved successfully', { 
+      videoId: savedVideo.video_id,
+      title: savedVideo.title,
+      userId: req.user._id,
+      userEmail: req.user.email
+    });
+
+    res.status(200).json(
+      utils.createResponse('success', 'Video metadata saved to database.', savedVideo)
+    );
+
+  } catch (error) {
+    logger.error('Error processing save link:', error);
+    
+    let errorMessage = 'Failed to process link.';
+    if (error.message && error.message.includes('youtube-dl')) {
+      errorMessage = 'Failed to fetch video metadata. Please check if the video is available.';
+    } else if (error.name === 'ValidationError') {
+      errorMessage = 'Invalid video data received.';
+    }
+
+    res.status(500).json(
+      utils.createResponse('error', errorMessage, { error: error.message })
+    );
+  }
 });
 
 // Delete User's Video
 app.delete('/user/videos/:videoId', authenticateToken, async (req, res) => {
-    try {
-        const { videoId } = req.params;
-        const userId = req.user._id;
+  try {
+    const { videoId } = req.params;
+    const userId = req.user._id;
 
-        const video = await Video.findOneAndDelete({ 
-            _id: videoId, 
-            saved_by: userId 
-        });
-
-        if (!video) {
-            return res.status(404).json({ 
-                status: 'error', 
-                message: 'Video not found or not owned by user' 
-            });
-        }
-
-        // Remove from user's saved videos
-        await User.findByIdAndUpdate(
-            userId,
-            { $pull: { savedVideos: videoId } }
-        );
-
-        res.status(200).json({
-            status: 'success',
-            message: 'Video deleted successfully'
-        });
-
-    } catch (error) {
-        console.error('Error deleting video:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Failed to delete video' 
-        });
+    if (!mongoose.Types.ObjectId.isValid(videoId)) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Invalid video ID format')
+      );
     }
+
+    const video = await Video.findOneAndDelete({ 
+      _id: videoId, 
+      saved_by: userId 
+    });
+
+    if (!video) {
+      return res.status(404).json(
+        utils.createResponse('error', 'Video not found or not owned by user')
+      );
+    }
+
+    // Remove from user's saved videos
+    await User.findByIdAndUpdate(
+      userId,
+      { $pull: { savedVideos: videoId } }
+    );
+
+    logger.info('Video deleted successfully', { 
+      videoId, 
+      title: video.title,
+      userId,
+      userEmail: req.user.email 
+    });
+
+    res.status(200).json(
+      utils.createResponse('success', 'Video deleted successfully')
+    );
+
+  } catch (error) {
+    logger.error('Error deleting video:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to delete video')
+    );
+  }
 });
 
 // Update User Profile
 app.put('/user/profile', authenticateToken, async (req, res) => {
-    try {
-        const { name, preferences } = req.body;
-        const userId = req.user._id;
+  try {
+    const { name, preferences } = req.body;
+    const userId = req.user._id;
 
-        const updateData = {};
-        if (name) updateData.name = name;
-        if (preferences) updateData.preferences = { ...req.user.preferences, ...preferences };
-
-        const updatedUser = await User.findByIdAndUpdate(
-            userId,
-            updateData,
-            { new: true }
-        ).select('-password');
-
-        res.status(200).json({
-            status: 'success',
-            message: 'Profile updated successfully',
-            user: updatedUser
-        });
-
-    } catch (error) {
-        console.error('Error updating profile:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Failed to update profile' 
-        });
+    const updateData = {};
+    
+    if (name) {
+      updateData.name = utils.sanitizeText(name, 100);
     }
+    
+    if (preferences && typeof preferences === 'object') {
+      updateData.preferences = { 
+        ...req.user.preferences, 
+        ...preferences 
+      };
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json(
+        utils.createResponse('error', 'No valid fields provided for update')
+      );
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      updateData,
+      { new: true, runValidators: true }
+    ).select('-password');
+
+    if (!updatedUser) {
+      return res.status(404).json(
+        utils.createResponse('error', 'User not found')
+      );
+    }
+
+    logger.info('User profile updated', { 
+      userId,
+      userEmail: req.user.email,
+      updatedFields: Object.keys(updateData)
+    });
+
+    res.status(200).json(
+      utils.createResponse('success', 'Profile updated successfully', { user: updatedUser })
+    );
+
+  } catch (error) {
+    logger.error('Error updating profile:', error);
+    
+    if (error.name === 'ValidationError') {
+      const message = Object.values(error.errors)[0]?.message || 'Validation failed';
+      return res.status(400).json(utils.createResponse('error', message));
+    }
+
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to update profile')
+    );
+  }
 });
 
 // Change Password
 app.put('/user/password', authenticateToken, async (req, res) => {
-    try {
-        const { currentPassword, newPassword } = req.body;
-        const userId = req.user._id;
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user._id;
 
-        if (!currentPassword || !newPassword) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'Current password and new password are required' 
-            });
-        }
-
-        if (newPassword.length < 6) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'New password must be at least 6 characters long' 
-            });
-        }
-
-        // Get user with password
-        const user = await User.findById(userId);
-        
-        // Verify current password
-        const validPassword = await bcrypt.compare(currentPassword, user.password);
-        if (!validPassword) {
-            return res.status(401).json({ 
-                status: 'error', 
-                message: 'Current password is incorrect' 
-            });
-        }
-
-        // Hash new password
-        const saltRounds = 10;
-        const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
-
-        // Update password
-        await User.findByIdAndUpdate(userId, { password: hashedNewPassword });
-
-        res.status(200).json({
-            status: 'success',
-            message: 'Password updated successfully'
-        });
-
-    } catch (error) {
-        console.error('Error changing password:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Failed to change password' 
-        });
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Current password and new password are required')
+      );
     }
-});
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.status(200).json({
-        status: 'success',
-        message: 'Server is running',
-        timestamp: new Date().toISOString()
+    if (newPassword.length < 6) {
+      return res.status(400).json(
+        utils.createResponse('error', 'New password must be at least 6 characters long')
+      );
+    }
+
+    // Get user with password
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json(
+        utils.createResponse('error', 'User not found')
+      );
+    }
+    
+    // Verify current password
+    const validPassword = await bcrypt.compare(currentPassword, user.password);
+    if (!validPassword) {
+      return res.status(401).json(
+        utils.createResponse('error', 'Current password is incorrect')
+      );
+    }
+
+    // Hash new password
+    const hashedNewPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+
+    // Update password
+    await User.findByIdAndUpdate(userId, { password: hashedNewPassword });
+
+    logger.info('Password changed successfully', { 
+      userId,
+      userEmail: req.user.email
     });
+
+    res.status(200).json(
+      utils.createResponse('success', 'Password updated successfully')
+    );
+
+  } catch (error) {
+    logger.error('Error changing password:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to change password')
+    );
+  }
 });
 
-// Error handling middleware
+// Get Video Details
+app.get('/user/videos/:videoId', authenticateToken, async (req, res) => {
+  try {
+    const { videoId } = req.params;
+    const userId = req.user._id;
+
+    if (!mongoose.Types.ObjectId.isValid(videoId)) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Invalid video ID format')
+      );
+    }
+
+    const video = await Video.findOne({ 
+      _id: videoId, 
+      saved_by: userId 
+    }).lean();
+
+    if (!video) {
+      return res.status(404).json(
+        utils.createResponse('error', 'Video not found or not owned by user')
+      );
+    }
+
+    res.status(200).json(
+      utils.createResponse('success', 'Video details retrieved successfully', video)
+    );
+
+  } catch (error) {
+    logger.error('Error fetching video details:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to fetch video details')
+    );
+  }
+});
+
+// Search Videos
+app.get('/user/videos/search/:query', authenticateToken, async (req, res) => {
+  try {
+    const { query } = req.params;
+    const userId = req.user._id;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
+
+    if (!query || query.trim().length < 2) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Search query must be at least 2 characters long')
+      );
+    }
+
+    const searchRegex = new RegExp(query.trim(), 'i');
+    
+    const searchFilter = {
+      saved_by: userId,
+      $or: [
+        { title: searchRegex },
+        { description: searchRegex },
+        { 'channel.name': searchRegex },
+        { tags: { $in: [searchRegex] } }
+      ]
+    };
+
+    const [videos, total] = await Promise.all([
+      Video.find(searchFilter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Video.countDocuments(searchFilter)
+    ]);
+
+    res.status(200).json(
+      utils.createResponse('success', 'Search completed successfully', {
+        videos,
+        query: query.trim(),
+        pagination: {
+          current: page,
+          total: Math.ceil(total / limit),
+          count: videos.length,
+          totalVideos: total
+        }
+      })
+    );
+
+  } catch (error) {
+    logger.error('Error searching videos:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to search videos')
+    );
+  }
+});
+
+// Admin Routes (if needed in future)
+app.get('/admin/stats', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json(
+        utils.createResponse('error', 'Admin access required')
+      );
+    }
+
+    const [userCount, videoCount, approvedVideoCount] = await Promise.all([
+      User.countDocuments({ isActive: true }),
+      Video.countDocuments(),
+      Video.countDocuments({ approved: true })
+    ]);
+
+    const stats = {
+      totalUsers: userCount,
+      totalVideos: videoCount,
+      approvedVideos: approvedVideoCount,
+      pendingApproval: videoCount - approvedVideoCount
+    };
+
+    res.status(200).json(
+      utils.createResponse('success', 'Admin stats retrieved successfully', stats)
+    );
+
+  } catch (error) {
+    logger.error('Error fetching admin stats:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to fetch admin statistics')
+    );
+  }
+});
+
+// --- Error Handling Middleware ---
+
+// Request timeout middleware
+app.use((req, res, next) => {
+  req.setTimeout(30000, () => {
+    res.status(408).json(
+      utils.createResponse('error', 'Request timeout')
+    );
+  });
+  next();
+});
+
+// Global error handling middleware
 app.use((error, req, res, next) => {
-    console.error('Global error handler:', error);
-    res.status(500).json({
-        status: 'error',
-        message: 'Internal server error',
-        ...(process.env.NODE_ENV === 'development' && { error: error.message })
-    });
+  logger.error('Global error handler:', {
+    message: error.message,
+    stack: NODE_ENV === 'development' ? error.stack : undefined,
+    url: req.originalUrl,
+    method: req.method,
+    ip: req.ip
+  });
+
+  // Handle specific error types
+  if (error.name === 'ValidationError') {
+    return res.status(400).json(
+      utils.createResponse('error', 'Validation failed', {
+        details: Object.values(error.errors).map(err => err.message)
+      })
+    );
+  }
+
+  if (error.name === 'CastError') {
+    return res.status(400).json(
+      utils.createResponse('error', 'Invalid ID format')
+    );
+  }
+
+  if (error.code === 11000) {
+    return res.status(400).json(
+      utils.createResponse('error', 'Duplicate entry')
+    );
+  }
+
+  res.status(500).json(
+    utils.createResponse('error', 'Internal server error', {
+      ...(NODE_ENV === 'development' && { error: error.message })
+    })
+  );
 });
 
-// Handle 404 routes
+// 404 handler (MUST BE LAST ROUTE)
 app.use('*', (req, res) => {
-    res.status(404).json({
-        status: 'error',
-        message: 'Route not found'
-    });
+  logger.warn('Route not found', { 
+    url: req.originalUrl, 
+    method: req.method,
+    ip: req.ip 
+  });
+  
+  res.status(404).json(
+    utils.createResponse('error', `Route not found: ${req.method} ${req.originalUrl}`)
+  );
 });
-app.get('/test', (req, res) => {
-    console.log('Test endpoint hit');
-    res.json({ 
-        message: 'Backend is working!', 
-        timestamp: new Date().toISOString(),
-        status: 'ok'
+
+// --- Graceful Shutdown ---
+const gracefulShutdown = (signal) => {
+  logger.info(`Received ${signal}. Starting graceful shutdown...`);
+  
+  server.close(() => {
+    logger.info('HTTP server closed');
+    
+    mongoose.connection.close(false, () => {
+      logger.info('MongoDB connection closed');
+      process.exit(0);
     });
+  });
+
+  // Force close after 10 seconds
+  setTimeout(() => {
+    logger.error('Force closing server');
+    process.exit(1);
+  }, 10000);
+};
+
+// Handle shutdown signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection:', { reason, promise });
+  process.exit(1);
 });
 
 // --- Start Server ---
-app.listen(port, () => {
-    console.log(`Server listening at http://localhost:${port}`);
-    console.log('Ready to save YouTube links to MongoDB with authentication.');
-    console.log('Available endpoints:');
-    console.log('- POST /auth/signup - User registration');
-    console.log('- POST /auth/login - User login');
-    console.log('- POST /save-link - Save YouTube video (authenticated)');
-    console.log('- GET /user/stats - Get user statistics');
-    console.log('- GET /user/videos - Get user\'s saved videos');
-    console.log('- DELETE /user/videos/:id - Delete user\'s video');
-    console.log('- PUT /user/profile - Update user profile');
-    console.log('- PUT /user/password - Change user password');
-    console.log('- GET /health - Health check');
-});
+const startServer = async () => {
+  try {
+    // Connect to database
+    await connectDB();
+    
+    // Start server
+    const server = app.listen(port, () => {
+      logger.info(`Server listening at http://localhost:${port}`, {
+        environment: NODE_ENV,
+        port,
+        timestamp: new Date().toISOString()
+      });
+      
+      console.log('\n🚀 YouTube Link Saver API Server Started');
+      console.log('📋 Available endpoints:');
+      console.log('  - GET  /health              - Health check');
+      console.log('  - GET  /test                - Test endpoint');
+      console.log('  - POST /auth/signup         - User registration');
+      console.log('  - POST /auth/login          - User login');
+      console.log('  - POST /save-link           - Save YouTube video (authenticated)');
+      console.log('  - GET  /user/stats          - Get user statistics');
+      console.log('  - GET  /user/videos         - Get user\'s saved videos');
+      console.log('  - GET  /user/videos/:id     - Get video details');
+      console.log('  - DELETE /user/videos/:id   - Delete user\'s video');
+      console.log('  - GET  /user/videos/search/:query - Search videos');
+      console.log('  - PUT  /user/profile        - Update user profile');
+      console.log('  - PUT  /user/password       - Change user password');
+      console.log('  - GET  /admin/stats         - Admin statistics');
+      console.log(`\n🔗 Server running on: http://localhost:${port}`);
+      console.log(`📊 Environment: ${NODE_ENV}`);
+      console.log(`🗄️  Database: ${MONGO_URI}`);
+    });
+
+    // Store server reference for graceful shutdown
+    global.server = server;
+    
+  } catch (error) {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+// Start the server
+startServer();

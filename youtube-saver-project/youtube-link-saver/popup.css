@@ -1,0 +1,540 @@
+/* popup.css - YouTube Link Saver Chrome Extension Styles */
+
+@property --angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* Reset and Base Styles */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Roboto', Arial, sans-serif;
+  background: linear-gradient(135deg, #1a1a1a 0%, #2d0000 100%);
+  color: #ffffff;
+  width: 350px;
+  min-height: 400px;
+  overflow: hidden;
+}
+
+.container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+}
+
+/* Form Container Management */
+.form-container {
+  padding: 20px;
+  transition: all 0.3s ease;
+  position: relative;
+  display: none;
+}
+
+.form-container.active {
+  display: block;
+}
+
+.dashboard {
+  padding: 20px;
+  display: none;
+}
+
+.dashboard.active {
+  display: block;
+}
+
+/* Header Styles */
+.header {
+  text-align: center;
+  margin-bottom: 25px;
+  position: relative;
+}
+
+.header h1, .header h2 {
+  font-size: 1.8rem;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 10px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.header-line {
+  width: 60px;
+  height: 3px;
+  background: linear-gradient(90deg, #ff0000, #cc0000);
+  margin: 0 auto;
+  border-radius: 2px;
+  margin-bottom: 15px;
+  box-shadow: 0 0 10px rgba(255, 0, 0, 0.3);
+}
+
+/* Loading Screen (removed) */
+
+/* Form Styles */
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  font-size: 0.9rem;
+  color: #cccccc;
+  font-weight: 500;
+}
+
+.form-group input {
+  padding: 12px 15px;
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #ffffff;
+  font-size: 1rem;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: #ff0000;
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.1);
+  transform: translateY(-1px);
+}
+
+.form-group input::placeholder {
+  color: #666666;
+}
+
+.form-group input:invalid:not(:placeholder-shown) {
+  border-color: rgba(255, 100, 100, 0.7);
+  background: rgba(100, 0, 0, 0.1);
+}
+
+.form-group input:valid:not(:placeholder-shown) {
+  border-color: rgba(100, 255, 100, 0.5);
+}
+
+/* Button Styles */
+.btn {
+  position: relative;
+  background: rgba(30, 30, 30, 0.8);
+  color: #fff;
+  border: solid 2px transparent;
+  border-radius: 8px;
+  padding: 12px 20px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  overflow: visible;
+  z-index: 2;
+  backdrop-filter: blur(10px);
+}
+
+.btn:hover {
+  background: rgba(50, 50, 50, 0.9);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  background: rgba(40, 40, 40, 0.6);
+  transform: none;
+  box-shadow: none;
+}
+
+.btn:disabled::before {
+  animation: none;
+  opacity: 0.3;
+}
+
+/* Primary Button with Animated Border */
+.btn-primary {
+  position: relative;
+  background: rgba(30, 30, 30, 0.9);
+}
+
+.btn-primary::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border: inherit;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--angle),
+    #ff0000 40%,
+    transparent,
+    #ff0000 60%
+  ) border-box;
+  mask: conic-gradient(#fff 0 0) subtract,
+       conic-gradient(#fff 0 0) padding-box;
+  z-index: -1;
+  animation: rotating-border 3s linear infinite;
+}
+
+.btn-primary:hover::before {
+  animation-duration: 1.5s;
+}
+
+@keyframes rotating-border {
+  from {
+    --angle: 0deg;
+  }
+  to {
+    --angle: 360deg;
+  }
+}
+
+/* Text and Link Styles */
+.text-center {
+  text-align: center;
+  margin-top: 15px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: #ff0000;
+  text-decoration: none;
+  font-weight: 500;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: color 0.2s ease;
+}
+
+.link-btn:hover {
+  color: #ff3333;
+  text-decoration: underline;
+}
+
+/* Dashboard Styles */
+.welcome-section {
+  margin-bottom: 25px;
+}
+
+.welcome-section h2 {
+  font-size: 1.8rem;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 10px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.user-email {
+  font-size: 0.9rem;
+  color: #cccccc;
+}
+
+.stats-container {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 25px;
+}
+
+.stat-card {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 15px;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.stat-number {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: #ff0000;
+  margin-bottom: 5px;
+  text-shadow: 0 0 10px rgba(255, 0, 0, 0.3);
+}
+
+.stat-label {
+  font-size: 0.8rem;
+  color: #cccccc;
+}
+
+.current-page-section {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  margin-bottom: 20px;
+}
+
+.current-page-section h3 {
+  margin-bottom: 10px;
+  color: #ffffff;
+  font-size: 1.1rem;
+}
+
+.current-page-info {
+  margin-bottom: 15px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  color: #cccccc;
+  border-left: 3px solid #ff0000;
+}
+
+.fade-in {
+  animation: fadeIn 0.5s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Version Info */
+.version-info {
+  position: absolute;
+  bottom: 5px;
+  right: 10px;
+  font-size: 0.7rem;
+  color: #666;
+  opacity: 0.7;
+}
+
+.btn span {
+  position: relative;
+  z-index: 1;
+}
+
+/* Loading State for Buttons */
+.btn .loading {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top: 2px solid #ffffff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+/* Dashboard Styles */
+.user-info {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(255, 0, 0, 0.2);
+  backdrop-filter: blur(10px);
+}
+
+.user-info p {
+  margin-bottom: 5px;
+}
+
+.user-email {
+  font-size: 0.9rem;
+  color: #cccccc;
+}
+
+/* Statistics */
+.stats {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 25px;
+}
+
+.stat-item {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 15px;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.stat-number {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: #ff0000;
+  margin-bottom: 5px;
+  text-shadow: 0 0 10px rgba(255, 0, 0, 0.3);
+}
+
+.stat-label {
+  font-size: 0.8rem;
+  color: #cccccc;
+}
+
+/* Current Page Section */
+.current-page {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+}
+
+.current-page h3 {
+  margin-bottom: 10px;
+  color: #ffffff;
+  font-size: 1.1rem;
+}
+
+.page-info {
+  margin-bottom: 15px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  color: #cccccc;
+  border-left: 3px solid #ff0000;
+}
+
+/* Message Styles */
+#loginMessage,
+#signupMessage {
+  margin-bottom: 15px;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: center;
+  display: none;
+}
+
+#loginMessage.error,
+#signupMessage.error {
+  background: rgba(200, 0, 0, 0.9);
+  border: 1px solid #ff0000;
+  color: #ffffff;
+  display: block;
+}
+
+#loginMessage.success,
+#signupMessage.success {
+  background: rgba(0, 150, 0, 0.9);
+  border: 1px solid #00ff00;
+  color: #ffffff;
+  display: block;
+}
+
+/* Responsive Design */
+@media (max-width: 320px) {
+  body {
+    width: 320px;
+  }
+  
+  .screen {
+    padding: 15px;
+  }
+  
+  .header h2 {
+    font-size: 1.6rem;
+  }
+  
+  .stats {
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 0, 0, 0.5);
+  border-radius: 3px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 0, 0, 0.7);
+}
+
+/* Accessibility */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Focus Styles for Accessibility */
+.btn:focus,
+input:focus,
+a:focus {
+  outline: 2px solid #ff0000;
+  outline-offset: 2px;
+}
+
+/* High Contrast Mode Support */
+@media (prefers-contrast: high) {
+  body {
+    background: #000000;
+  }
+  
+  .input-group input {
+    border-color: #ffffff;
+    background: #000000;
+  }
+  
+  .btn {
+    border-color: #ffffff;
+    background: #000000;
+  }
+}
+
+/* Dark Mode Support (already dark, but for consistency) */
+@media (prefers-color-scheme: dark) {
+  /* Already optimized for dark mode */
+}
+
+/* Print Styles (if needed) */
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  
+  .btn-primary::before {
+    display: none;
+  }
+}
