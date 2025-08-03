@@ -1,20 +1,22 @@
-// --- Imports ---
+// server.js - Using Python yt-dlp directly
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const youtubeDl = require('youtube-dl-exec');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const { spawn, exec } = require('child_process');
+const { promisify } = require('util');
 
 // --- Initializations ---
 const app = express();
 const port = process.env.PORT || 3000;
+const execAsync = promisify(exec);
 
 // --- Environment Variables ---
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production-make-it-very-long-and-random';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/youtube-links';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
@@ -39,14 +41,14 @@ const logger = {
 
 // --- Security Middleware ---
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable for development
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 
 // --- Rate Limiting ---
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: NODE_ENV === 'development' ? 1000 : 100, // Higher limit for development
+  windowMs: 15 * 60 * 1000,
+  max: NODE_ENV === 'development' ? 1000 : 100,
   message: {
     status: 'error',
     message: 'Too many requests from this IP, please try again later.'
@@ -56,8 +58,8 @@ const limiter = rateLimit({
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: NODE_ENV === 'development' ? 50 : 5, // 5 attempts per 15 minutes in production
+  windowMs: 15 * 60 * 1000,
+  max: NODE_ENV === 'development' ? 50 : 5,
   message: {
     status: 'error',
     message: 'Too many authentication attempts, please try again later.'
@@ -136,7 +138,7 @@ const UserSchema = new mongoose.Schema({
     ref: 'Video' 
   }],
   preferences: {
-    autoApprove: { type: Boolean, default: true }, // Changed to true for easier testing
+    autoApprove: { type: Boolean, default: true },
     emailNotifications: { type: Boolean, default: true }
   },
   lastLoginAt: { type: Date },
@@ -152,7 +154,7 @@ UserSchema.index({ isActive: 1 });
 
 const User = mongoose.model('User', UserSchema);
 
-// --- Updated Video Schema ---
+// --- Video Schema ---
 const VideoSchema = new mongoose.Schema({
   video_id: { 
     type: String, 
@@ -237,13 +239,13 @@ const VideoSchema = new mongoose.Schema({
     }],
     default: []
   },
-  approved: { type: Boolean, default: true }, // Changed to true for easier testing
+  approved: { type: Boolean, default: true },
   approved_by: { type: String, default: null },
   approved_at: { type: Date, default: null },
   saved_by: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User', 
-    required: false // CHANGED: Made optional for no-auth mode
+    required: false
   },
   last_updated: { type: Date, default: Date.now },
   player_settings: {
@@ -271,7 +273,7 @@ const VideoSchema = new mongoose.Schema({
   timestamps: true 
 });
 
-// Compound indexes for better query performance
+// Compound indexes
 VideoSchema.index({ video_id: 1, saved_by: 1 });
 VideoSchema.index({ saved_by: 1, createdAt: -1 });
 VideoSchema.index({ approved: 1 });
@@ -280,7 +282,6 @@ const Video = mongoose.model('Video', VideoSchema);
 
 // --- Utility Functions ---
 const utils = {
-  // Create standardized response
   createResponse: (status, message, data = null, statusCode = 200) => ({
     status,
     message,
@@ -288,7 +289,6 @@ const utils = {
     ...(data && { data })
   }),
 
-  // Validate YouTube URL
   isValidYouTubeUrl: (url) => {
     try {
       const urlObj = new URL(url);
@@ -301,7 +301,6 @@ const utils = {
     }
   },
 
-  // Extract video ID from YouTube URL
   extractVideoId: (url) => {
     try {
       const urlObj = new URL(url);
@@ -314,7 +313,6 @@ const utils = {
     }
   },
 
-  // Format duration from seconds
   formatDuration: (seconds) => {
     if (!seconds || seconds === 0) return '0:00';
     
@@ -328,14 +326,164 @@ const utils = {
     return `${minutes}:${secs.toString().padStart(2, '0')}`;
   },
 
-  // Sanitize text input
   sanitizeText: (text, maxLength = 1000) => {
     if (!text) return '';
     return text.toString().trim().substring(0, maxLength);
+  },
+
+  // Check if yt-dlp is installed
+  checkYtDlpInstallation: async () => {
+    try {
+      const { stdout } = await execAsync('yt-dlp --version');
+      logger.info('yt-dlp version detected:', stdout.trim());
+      return true;
+    } catch (error) {
+      logger.error('yt-dlp not found. Please install it with: pip install yt-dlp');
+      return false;
+    }
+  },
+
+  // Function to get video metadata using Python yt-dlp
+  getVideoMetadata: async (url) => {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ytdlpProcess.kill('SIGTERM');
+        reject(new Error('yt-dlp process timed out after 30 seconds'));
+      }, 30000);
+
+      const ytdlpProcess = spawn('yt-dlp', [
+        '--dump-json',
+        '--no-warnings',
+        '--skip-download',
+        '--format', 'best[height<=720]/best',
+        '--no-playlist',
+        '--ignore-errors',
+        url
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      ytdlpProcess.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      ytdlpProcess.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      ytdlpProcess.on('close', (code) => {
+        clearTimeout(timeout);
+        
+        if (code === 0) {
+          try {
+            // Parse the JSON output
+            const lines = stdout.trim().split('\n');
+            const jsonLine = lines.find(line => line.startsWith('{'));
+            
+            if (!jsonLine) {
+              logger.error('No JSON output from yt-dlp', { stdout, stderr });
+              reject(new Error('No valid JSON output from yt-dlp'));
+              return;
+            }
+
+            const metadata = JSON.parse(jsonLine);
+            logger.debug('yt-dlp metadata parsed successfully', { 
+              title: metadata.title,
+              duration: metadata.duration,
+              uploader: metadata.uploader
+            });
+            resolve(metadata);
+          } catch (parseError) {
+            logger.error('Failed to parse yt-dlp JSON output', { 
+              parseError: parseError.message,
+              stdout: stdout.substring(0, 500) + '...',
+              stderr 
+            });
+            reject(new Error('Failed to parse video metadata from yt-dlp'));
+          }
+        } else {
+          logger.error('yt-dlp process failed', { 
+            code, 
+            stderr: stderr.substring(0, 500) + '...',
+            stdout: stdout.substring(0, 200) + '...'
+          });
+          
+          // Check for common error patterns
+          if (stderr.includes('Video unavailable')) {
+            reject(new Error('Video is unavailable or private'));
+          } else if (stderr.includes('age-restricted')) {
+            reject(new Error('Video is age-restricted'));
+          } else if (stderr.includes('region')) {
+            reject(new Error('Video is not available in your region'));
+          } else if (stderr.includes('copyright')) {
+            reject(new Error('Video has copyright restrictions'));
+          } else {
+            reject(new Error(`Failed to fetch video metadata: ${stderr.split('\n')[0] || 'Unknown error'}`));
+          }
+        }
+      });
+
+      ytdlpProcess.on('error', (error) => {
+        clearTimeout(timeout);
+        logger.error('yt-dlp spawn error', error);
+        
+        if (error.code === 'ENOENT') {
+          reject(new Error('yt-dlp is not installed. Please install it with: pip install yt-dlp'));
+        } else {
+          reject(new Error(`Failed to start yt-dlp process: ${error.message}`));
+        }
+      });
+    });
+  },
+
+  // Safe number formatting
+  formatNumber: (num) => {
+    if (!num || isNaN(num)) return '0';
+    return parseInt(num).toLocaleString();
+  },
+
+  // Safe date formatting
+  formatUploadDate: (dateString) => {
+    if (!dateString) return new Date().toISOString().split('T')[0];
+    
+    // yt-dlp returns dates in YYYYMMDD format
+    if (dateString.length === 8 && /^\d{8}$/.test(dateString)) {
+      return `${dateString.slice(0, 4)}-${dateString.slice(4, 6)}-${dateString.slice(6, 8)}`;
+    }
+    
+    // Try to parse as regular date
+    try {
+      const date = new Date(dateString);
+      if (!isNaN(date.getTime())) {
+        return date.toISOString().split('T')[0];
+      }
+    } catch (e) {
+      // Ignore parsing errors
+    }
+    
+    return new Date().toISOString().split('T')[0];
+  },
+
+  // Get best thumbnail URL
+  getBestThumbnail: (thumbnails) => {
+    if (!thumbnails || !Array.isArray(thumbnails) || thumbnails.length === 0) {
+      return 'https://via.placeholder.com/320x180?text=No+Thumbnail';
+    }
+
+    // Sort by resolution (width * height) descending
+    const sortedThumbnails = thumbnails
+      .filter(thumb => thumb.url && thumb.width && thumb.height)
+      .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+
+    // Return the highest resolution thumbnail, or the first available one
+    return sortedThumbnails[0]?.url || thumbnails[0]?.url || 'https://via.placeholder.com/320x180?text=No+Thumbnail';
   }
 };
 
-// --- IMPROVED Auth Middleware ---
+// --- Improved Auth Middleware ---
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
@@ -354,7 +502,6 @@ const authenticateToken = async (req, res, next) => {
       );
     }
 
-    // Check if header starts with 'Bearer '
     if (!authHeader.startsWith('Bearer ')) {
       logger.warn('Invalid authorization header format', { 
         authHeader: authHeader.substring(0, 20) + '...',
@@ -384,7 +531,6 @@ const authenticateToken = async (req, res, next) => {
       ip: req.ip 
     });
 
-    // Verify JWT token
     const decoded = jwt.verify(token, JWT_SECRET);
     logger.debug('Token decoded successfully', { 
       userId: decoded.userId,
@@ -392,7 +538,6 @@ const authenticateToken = async (req, res, next) => {
       exp: new Date(decoded.exp * 1000).toISOString()
     });
 
-    // Find user
     const user = await User.findById(decoded.userId).select('-password');
     
     if (!user) {
@@ -468,6 +613,21 @@ app.get('/test', (req, res) => {
   }));
 });
 
+// Test yt-dlp installation
+app.get('/test-ytdlp', async (req, res) => {
+  try {
+    const isInstalled = await utils.checkYtDlpInstallation();
+    if (isInstalled) {
+      res.json(utils.createResponse('success', 'yt-dlp is properly installed and working'));
+    } else {
+      res.status(500).json(utils.createResponse('error', 'yt-dlp is not installed or not working'));
+    }
+  } catch (error) {
+    logger.error('Error testing yt-dlp:', error);
+    res.status(500).json(utils.createResponse('error', 'Failed to test yt-dlp installation'));
+  }
+});
+
 // DEBUG: Token verification endpoint (REMOVE IN PRODUCTION)
 if (NODE_ENV === 'development') {
   app.post('/debug-auth', (req, res) => {
@@ -522,7 +682,6 @@ app.post('/auth/signup', async (req, res) => {
 
     logger.info('Signup attempt', { email });
 
-    // Validation
     if (!name || !email || !password) {
       return res.status(400).json(
         utils.createResponse('error', 'Name, email, and password are required')
@@ -535,11 +694,9 @@ app.post('/auth/signup', async (req, res) => {
       );
     }
 
-    // Sanitize inputs
     const sanitizedName = utils.sanitizeText(name, 100);
     const sanitizedEmail = email.toLowerCase().trim();
 
-    // Check if user already exists
     const existingUser = await User.findOne({ email: sanitizedEmail });
     if (existingUser) {
       return res.status(400).json(
@@ -547,10 +704,8 @@ app.post('/auth/signup', async (req, res) => {
       );
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-    // Create user
     const user = new User({
       name: sanitizedName,
       email: sanitizedEmail,
@@ -559,7 +714,6 @@ app.post('/auth/signup', async (req, res) => {
 
     await user.save();
 
-    // Generate JWT token
     const token = jwt.sign(
       { 
         userId: user._id, 
@@ -570,12 +724,10 @@ app.post('/auth/signup', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    // Update login stats
     user.loginCount = 1;
     user.lastLoginAt = new Date();
     await user.save();
 
-    // Return user data (password excluded by schema transform)
     const userData = {
       id: user._id,
       name: user.name,
@@ -614,7 +766,6 @@ app.post('/auth/login', async (req, res) => {
 
     logger.info('Login attempt', { email });
 
-    // Validation
     if (!email || !password) {
       return res.status(400).json(
         utils.createResponse('error', 'Email and password are required')
@@ -623,7 +774,6 @@ app.post('/auth/login', async (req, res) => {
 
     const sanitizedEmail = email.toLowerCase().trim();
 
-    // Find user
     const user = await User.findOne({ email: sanitizedEmail });
     if (!user) {
       logger.warn('Login failed - user not found', { email: sanitizedEmail });
@@ -632,7 +782,6 @@ app.post('/auth/login', async (req, res) => {
       );
     }
 
-    // Check if user is active
     if (!user.isActive) {
       logger.warn('Login failed - user inactive', { email: sanitizedEmail });
       return res.status(401).json(
@@ -640,7 +789,6 @@ app.post('/auth/login', async (req, res) => {
       );
     }
 
-    // Verify password
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       logger.warn('Login failed - invalid password', { email: sanitizedEmail });
@@ -649,12 +797,10 @@ app.post('/auth/login', async (req, res) => {
       );
     }
 
-    // Update login stats
     user.loginCount = (user.loginCount || 0) + 1;
     user.lastLoginAt = new Date();
     await user.save();
 
-    // Generate JWT token
     const token = jwt.sign(
       { 
         userId: user._id, 
@@ -665,7 +811,6 @@ app.post('/auth/login', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    // Return user data (password excluded by schema transform)
     const userData = {
       id: user._id,
       name: user.name,
@@ -768,15 +913,30 @@ app.get('/user/videos', authenticateToken, async (req, res) => {
   }
 });
 
-// MAIN SAVE LINK ENDPOINT - NO AUTHENTICATION REQUIRED
+// MAIN SAVE LINK ENDPOINT
 app.post('/save-link', async (req, res) => {
   try {
     const { url } = req.body;
+    const authHeader = req.headers['authorization'];
+    let userId = null;
     
-    logger.info('Save link request received (NO AUTH)', { 
+    logger.info('Save link request received', { 
       url,
-      ip: req.ip
+      ip: req.ip,
+      hasAuth: !!authHeader
     });
+
+    // Check for authentication
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+        logger.info('Authenticated request', { userId });
+      } catch (error) {
+        logger.warn('Invalid token in save-link request', { error: error.message });
+      }
+    }
 
     if (!url) {
       return res.status(400).json(
@@ -799,14 +959,16 @@ app.post('/save-link', async (req, res) => {
       );
     }
 
-    logger.info('Processing video (NO AUTH)', { 
+    logger.info('Processing video', { 
       videoId,
-      url
+      url,
+      userId
     });
 
-    // Check if video already exists (without user check for now)
+    // Check if video already exists
     const existingVideo = await Video.findOne({ 
-      video_id: videoId
+      video_id: videoId,
+      ...(userId && { saved_by: userId })
     });
 
     if (existingVideo) {
@@ -819,74 +981,94 @@ app.post('/save-link', async (req, res) => {
       );
     }
 
-    logger.info('Fetching video metadata with youtube-dl', { videoId });
+    logger.info('Fetching video metadata with yt-dlp', { videoId });
 
-    // Use youtube-dl-exec to get video metadata
-    const metadata = await youtubeDl(url, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      skipDownload: true,
-      format: 'best[height<=720]',
-      timeout: 30
-    });
+    // Use Python yt-dlp to get video metadata
+    const metadata = await utils.getVideoMetadata(url);
 
     logger.info('Video metadata fetched successfully', { 
       videoId,
       title: metadata.title,
-      duration: metadata.duration 
+      duration: metadata.duration,
+      uploader: metadata.uploader 
     });
 
     // Format duration
     const durationFormatted = utils.formatDuration(metadata.duration);
 
+    // Get best thumbnail
+    const thumbnailUrl = utils.getBestThumbnail(metadata.thumbnails);
+
+    // Prepare video data with user association
     const videoData = {
       video_id: videoId,
       title: utils.sanitizeText(metadata.title || 'Unknown Title', 500),
       url: metadata.webpage_url || url,
       embed_url: `https://www.youtube.com/embed/${videoId}`,
       embed_iframe: `<iframe width="560" height="315" src="https://www.youtube.com/embed/${videoId}" frameborder="0" allowfullscreen></iframe>`,
-      thumbnail: metadata.thumbnail || metadata.thumbnails?.[0]?.url || 'https://via.placeholder.com/320x180',
+      thumbnail: thumbnailUrl,
       duration: durationFormatted,
-      views: (metadata.view_count || 0).toLocaleString(),
-      upload_date: metadata.upload_date
-        ? `${metadata.upload_date.slice(0, 4)}-${metadata.upload_date.slice(4, 6)}-${metadata.upload_date.slice(6, 8)}`
-        : new Date().toISOString().split('T')[0],
+      views: utils.formatNumber(metadata.view_count),
+      upload_date: utils.formatUploadDate(metadata.upload_date),
       description: utils.sanitizeText(metadata.description || 'No description available', 5000),
       channel: {
         name: utils.sanitizeText(metadata.uploader || metadata.channel || 'Unknown Channel', 200),
         url: metadata.uploader_url || metadata.channel_url || '#',
-        subscribers: (metadata.channel_follower_count || 0).toLocaleString(),
+        subscribers: utils.formatNumber(metadata.channel_follower_count || metadata.subscriber_count),
         verified: metadata.channel_is_verified || false,
-        logo: metadata.uploader_avatar || metadata.channel_thumbnail || 'https://via.placeholder.com/150'
+        logo: metadata.uploader_avatar || 
+              (metadata.channel_thumbnails && metadata.channel_thumbnails[0] && metadata.channel_thumbnails[0].url) ||
+              'https://via.placeholder.com/150'
       },
-      category: Array.isArray(metadata.categories) ? metadata.categories : ['Uncategorized'],
-      age_rating: metadata.age_limit > 0 ? `${metadata.age_limit}+` : 'N/A',
+      category: Array.isArray(metadata.categories) && metadata.categories.length > 0 
+                ? metadata.categories.slice(0, 5) 
+                : ['Uncategorized'],
+      age_rating: metadata.age_limit && metadata.age_limit > 0 ? `${metadata.age_limit}+` : 'N/A',
       likes: metadata.like_count || 0,
       comment_count: metadata.comment_count || 0,
       comments_enabled: (metadata.comment_count || 0) > 0,
       tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 20) : [],
-      chapters: Array.isArray(metadata.chapters) ? metadata.chapters : [],
-      // NO saved_by field - will be null/undefined
-      approved: true,
-      approved_by: 'system',
-      approved_at: new Date(),
+      chapters: Array.isArray(metadata.chapters) ? metadata.chapters.map(chapter => ({
+        title: chapter.title || 'Untitled Chapter',
+        start_time: chapter.start_time || 0,
+        end_time: chapter.end_time || 0
+      })) : [],
+      saved_by: userId || undefined,
+      approved: userId ? false : true,
+      approved_by: userId ? null : 'system',
+      approved_at: userId ? null : new Date(),
       last_updated: new Date()
     };
 
     const savedVideo = new Video(videoData);
     await savedVideo.save();
 
-    logger.info('Video saved successfully (NO AUTH)', { 
+    // Update user's saved videos if authenticated
+    if (userId) {
+      await User.findByIdAndUpdate(
+        userId,
+        { $addToSet: { savedVideos: savedVideo._id } }
+      );
+    }
+
+    logger.info('Video saved successfully', { 
       videoId: savedVideo.video_id,
-      title: savedVideo.title
+      title: savedVideo.title,
+      userId,
+      isAuthenticated: !!userId
     });
+
+    // Log counts for debugging
+    const totalVideos = await Video.countDocuments();
+    const userVideos = userId ? await Video.countDocuments({ saved_by: userId }) : 0;
+    logger.debug('Video counts after save', { totalVideos, userVideos });
 
     res.status(200).json(
       utils.createResponse('success', 'Video metadata saved to database successfully!', savedVideo)
     );
 
   } catch (error) {
-    logger.error('Error processing save link (NO AUTH):', {
+    logger.error('Error processing save link:', {
       message: error.message,
       stack: NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -894,12 +1076,24 @@ app.post('/save-link', async (req, res) => {
     let errorMessage = 'Failed to process link.';
     let statusCode = 500;
     
-    if (error.message && error.message.includes('youtube-dl')) {
-      errorMessage = 'Failed to fetch video metadata. Please check if the video is available and not private.';
-      statusCode = 400;
-    } else if (error.message && error.message.includes('Video unavailable')) {
+    if (error.message && error.message.includes('yt-dlp is not installed')) {
+      errorMessage = 'yt-dlp is not installed. Please install it with: pip install yt-dlp';
+      statusCode = 500;
+    } else if (error.message && error.message.includes('Video is unavailable')) {
       errorMessage = 'This video is unavailable or private.';
       statusCode = 400;
+    } else if (error.message && error.message.includes('age-restricted')) {
+      errorMessage = 'This video is age-restricted and cannot be processed.';
+      statusCode = 400;
+    } else if (error.message && error.message.includes('region')) {
+      errorMessage = 'This video is not available in your region.';
+      statusCode = 400;
+    } else if (error.message && error.message.includes('copyright')) {
+      errorMessage = 'This video has copyright restrictions.';
+      statusCode = 400;
+    } else if (error.message && error.message.includes('timeout')) {
+      errorMessage = 'Request timed out while fetching video metadata.';
+      statusCode = 408;
     } else if (error.name === 'ValidationError') {
       errorMessage = 'Invalid video data received.';
       statusCode = 400;
@@ -939,7 +1133,6 @@ app.delete('/user/videos/:videoId', authenticateToken, async (req, res) => {
       );
     }
 
-    // Remove from user's saved videos
     await User.findByIdAndUpdate(
       userId,
       { $pull: { savedVideos: videoId } }
@@ -1043,7 +1236,6 @@ app.put('/user/password', authenticateToken, async (req, res) => {
       );
     }
 
-    // Get user with password
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json(
@@ -1051,7 +1243,6 @@ app.put('/user/password', authenticateToken, async (req, res) => {
       );
     }
     
-    // Verify current password
     const validPassword = await bcrypt.compare(currentPassword, user.password);
     if (!validPassword) {
       return res.status(401).json(
@@ -1059,10 +1250,7 @@ app.put('/user/password', authenticateToken, async (req, res) => {
       );
     }
 
-    // Hash new password
     const hashedNewPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
-
-    // Update password
     await User.findByIdAndUpdate(userId, { password: hashedNewPassword });
 
     logger.info('Password changed successfully', { 
@@ -1253,12 +1441,10 @@ app.use((error, req, res, next) => {
     userId: req.user?._id
   });
 
-  // Prevent duplicate responses
   if (res.headersSent) {
     return next(error);
   }
 
-  // Handle specific error types
   if (error.name === 'ValidationError') {
     return res.status(400).json(
       utils.createResponse('error', 'Validation failed', {
@@ -1292,7 +1478,7 @@ app.use((error, req, res, next) => {
   );
 });
 
-// 404 handler (MUST BE LAST ROUTE)
+// 404 handler
 app.use('*', (req, res) => {
   logger.warn('Route not found', { 
     url: req.originalUrl, 
@@ -1319,7 +1505,6 @@ const gracefulShutdown = (signal) => {
       });
     });
 
-    // Force close after 10 seconds
     setTimeout(() => {
       logger.error('Force closing server');
       process.exit(1);
@@ -1329,11 +1514,9 @@ const gracefulShutdown = (signal) => {
   }
 };
 
-// Handle shutdown signals
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught Exception:', error);
   process.exit(1);
@@ -1344,13 +1527,41 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
+// --- Startup Check ---
+const checkDependencies = async () => {
+  logger.info('Checking system dependencies...');
+  
+  try {
+    const ytdlpInstalled = await utils.checkYtDlpInstallation();
+    if (!ytdlpInstalled) {
+      logger.error('⚠️  yt-dlp is not installed!');
+      logger.info('Please install yt-dlp using one of these methods:');
+      logger.info('  - pip install yt-dlp');
+      logger.info('  - pip3 install yt-dlp');
+      logger.info('  - python -m pip install yt-dlp');
+      logger.info('  - Or visit: https://github.com/yt-dlp/yt-dlp#installation');
+      return false;
+    } else {
+      logger.info('✅ yt-dlp is installed and working');
+      return true;
+    }
+  } catch (error) {
+    logger.error('Error checking dependencies:', error);
+    return false;
+  }
+};
+
 // --- Start Server ---
 const startServer = async () => {
   try {
-    // Connect to database
+    // Check dependencies first
+    const dependenciesOk = await checkDependencies();
+    if (!dependenciesOk) {
+      logger.warn('⚠️  Starting server without yt-dlp. Video processing will not work until yt-dlp is installed.');
+    }
+
     await connectDB();
     
-    // Start server
     const server = app.listen(port, () => {
       logger.info(`Server listening at http://localhost:${port}`, {
         environment: NODE_ENV,
@@ -1362,10 +1573,11 @@ const startServer = async () => {
       console.log('📋 Available endpoints:');
       console.log('  - GET  /health              - Health check');
       console.log('  - GET  /test                - Test endpoint');
+      console.log('  - GET  /test-ytdlp          - Test yt-dlp installation');
       console.log('  - POST /auth/signup         - User registration');
       console.log('  - POST /auth/login          - User login');
       console.log('  - GET  /auth/validate       - Validate token');
-      console.log('  - POST /save-link           - Save YouTube video (NO AUTH REQUIRED)');
+      console.log('  - POST /save-link           - Save YouTube video');
       console.log('  - GET  /user/stats          - Get user statistics');
       console.log('  - GET  /user/videos         - Get user\'s saved videos');
       console.log('  - GET  /user/videos/:id     - Get video details');
@@ -1381,11 +1593,16 @@ const startServer = async () => {
       console.log(`📊 Environment: ${NODE_ENV}`);
       console.log(`🗄️  Database: ${MONGO_URI}`);
       console.log(`🔐 JWT Secret: ${JWT_SECRET.substring(0, 20)}...`);
+      
+      if (dependenciesOk) {
+        console.log(`✅ yt-dlp: Installed and ready`);
+      } else {
+        console.log(`⚠️  yt-dlp: Not installed - install with 'pip install yt-dlp'`);
+      }
+      
       console.log('\n✅ Ready to accept requests!');
-      console.log('\n🚨 NOTE: /save-link route has NO AUTHENTICATION for testing!');
     });
 
-    // Store server reference for graceful shutdown
     global.server = server;
     
   } catch (error) {
