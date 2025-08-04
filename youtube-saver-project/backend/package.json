@@ -26,7 +26,6 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^7.8.7",
     "rate-limit": "^0.1.1",
-    "youtube-dl-exec": "^2.4.13",
     "yt-dlp-wrap": "^2.3.12"
   },
   "devDependencies": {
