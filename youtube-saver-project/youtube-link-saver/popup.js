@@ -1,4 +1,4 @@
-// popup.js - Complete Chrome Extension Popup Script
+// popup.js - Optimized Chrome Extension Popup Script
 (() => {
     'use strict';
 
@@ -9,7 +9,8 @@
             login: '/auth/login',
             signup: '/auth/signup',
             stats: '/user/stats',
-            saveLink: '/save-link'
+            saveLink: '/save-link',
+            checkVideo: '/user/videos/check'
         }
     };
 
@@ -17,31 +18,23 @@
     let currentUser = null;
     let isLoading = false;
     let currentTab = null;
+    let currentVideoSaved = false;
 
-    // DOM elements - with null checking
+    // DOM elements
     const elements = {
-        // Forms
         loginForm: document.getElementById('loginForm'),
         signupForm: document.getElementById('signupForm'),
         dashboard: document.getElementById('dashboard'),
-        
-        // Form elements
         loginFormElement: document.getElementById('loginFormElement'),
         signupFormElement: document.getElementById('signupFormElement'),
-        
-        // Buttons
         loginBtn: document.getElementById('loginBtn'),
         signupBtn: document.getElementById('signupBtn'),
         showSignupBtn: document.getElementById('showSignupBtn'),
         showLoginBtn: document.getElementById('showLoginBtn'),
         logoutBtn: document.getElementById('logoutBtn'),
         saveCurrentBtn: document.getElementById('saveCurrentBtn'),
-        
-        // Messages
         loginMessage: document.getElementById('loginMessage'),
         signupMessage: document.getElementById('signupMessage'),
-        
-        // Dashboard elements
         userEmail: document.getElementById('userEmail'),
         savedCount: document.getElementById('savedCount'),
         approvedCount: document.getElementById('approvedCount'),
@@ -52,17 +45,11 @@
     const checkRequiredElements = () => {
         const required = ['loginForm', 'signupForm', 'dashboard', 'loginFormElement', 'signupFormElement'];
         const missing = required.filter(id => !elements[id]);
-        
-        if (missing.length > 0) {
-            console.error('Missing required elements:', missing);
-            return false;
-        }
-        return true;
+        return missing.length === 0;
     };
 
     // Utility functions
     const utils = {
-        // Show message with type (error/success)
         showMessage: (element, message, type = 'error') => {
             if (!element) return;
             
@@ -77,7 +64,6 @@
             }, 5000);
         },
 
-        // Set loading state for button
         setLoading: (button, loading, loadingText = 'Loading...') => {
             if (!button) return;
             
@@ -101,18 +87,15 @@
             }
         },
 
-        // Validate email format
         validateEmail: (email) => {
             const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
             return re.test(email);
         },
 
-        // Validate password strength
         validatePassword: (password) => {
             return password.length >= 6;
         },
 
-        // Store original button text
         storeOriginalButtonText: (button) => {
             if (button && !button.getAttribute('data-original-text')) {
                 const span = button.querySelector('span');
@@ -121,12 +104,6 @@
             }
         },
 
-        // Format numbers
-        formatNumber: (num) => {
-            return parseInt(num).toLocaleString();
-        },
-
-        // Animate number counter
         animateCounter: (element, targetValue, duration = 1000) => {
             if (!element) return;
             
@@ -143,12 +120,34 @@
                 }
                 element.textContent = Math.floor(currentValue);
             }, 16);
+        },
+
+        extractVideoId: (url) => {
+            try {
+                const urlObj = new URL(url);
+                if (urlObj.hostname === 'youtu.be') {
+                    return urlObj.pathname.slice(1);
+                }
+                return urlObj.searchParams.get('v');
+            } catch {
+                return null;
+            }
+        },
+
+        isYouTubeVideoUrl: (url) => {
+            try {
+                const urlObj = new URL(url);
+                return urlObj.hostname === 'www.youtube.com' && 
+                       urlObj.pathname === '/watch' &&
+                       urlObj.searchParams.has('v');
+            } catch {
+                return false;
+            }
         }
     };
 
     // Storage management
     const storage = {
-        // Save user session
         saveSession: (userData) => {
             return new Promise((resolve, reject) => {
                 try {
@@ -161,7 +160,6 @@
                             }
                         });
                     } else {
-                        // Fallback for testing
                         localStorage.setItem('userSession', JSON.stringify(userData));
                         resolve();
                     }
@@ -171,7 +169,6 @@
             });
         },
 
-        // Get user session
         getSession: () => {
             return new Promise((resolve, reject) => {
                 try {
@@ -184,7 +181,6 @@
                             }
                         });
                     } else {
-                        // Fallback for testing
                         const session = localStorage.getItem('userSession');
                         resolve(session ? JSON.parse(session) : null);
                     }
@@ -194,7 +190,6 @@
             });
         },
 
-        // Clear user session
         clearSession: () => {
             return new Promise((resolve, reject) => {
                 try {
@@ -207,7 +202,6 @@
                             }
                         });
                     } else {
-                        // Fallback for testing
                         localStorage.removeItem('userSession');
                         resolve();
                     }
@@ -220,7 +214,6 @@
 
     // API management
     const api = {
-        // Make authenticated request
         request: async (endpoint, options = {}) => {
             try {
                 const userSession = await storage.getSession();
@@ -233,8 +226,6 @@
                     headers.Authorization = `Bearer ${userSession.token}`;
                 }
 
-                console.log(`Making API request to: ${CONFIG.backendUrl}${endpoint}`);
-
                 const response = await fetch(`${CONFIG.backendUrl}${endpoint}`, {
                     ...options,
                     headers
@@ -246,7 +237,6 @@
                     data = await response.json();
                 } else {
                     const text = await response.text();
-                    console.log('Non-JSON response:', text);
                     throw new Error(`Unexpected response format: ${contentType}`);
                 }
 
@@ -256,12 +246,10 @@
 
                 return data;
             } catch (error) {
-                console.error('API request failed:', error);
                 throw error;
             }
         },
 
-        // Login user
         login: async (email, password) => {
             return api.request(CONFIG.endpoints.login, {
                 method: 'POST',
@@ -269,7 +257,6 @@
             });
         },
 
-        // Register user
         signup: async (name, email, password) => {
             return api.request(CONFIG.endpoints.signup, {
                 method: 'POST',
@@ -277,17 +264,19 @@
             });
         },
 
-        // Get user stats
         getStats: async () => {
             return api.request(CONFIG.endpoints.stats);
         },
 
-        // Save current video
         saveCurrentVideo: async (url) => {
             return api.request(CONFIG.endpoints.saveLink, {
                 method: 'POST',
                 body: JSON.stringify({ url })
             });
+        },
+
+        checkVideoSaved: async (videoId) => {
+            return api.request(`${CONFIG.endpoints.checkVideo}/${videoId}`);
         }
     };
 
@@ -324,7 +313,6 @@
 
     // Authentication handlers
     const auth = {
-        // Handle login
         login: async (formData) => {
             if (isLoading) return;
             
@@ -334,7 +322,6 @@
 
                 const { email, password } = formData;
 
-                // Validation
                 if (!utils.validateEmail(email)) {
                     throw new Error('Please enter a valid email address');
                 }
@@ -343,26 +330,13 @@
                     throw new Error('Password must be at least 6 characters long');
                 }
 
-                console.log('Attempting login for:', email);
-
-                // API call
                 const response = await api.login(email, password);
                 
-                console.log('Login response received:', response);
-
-                // Handle different possible response structures
                 let userData = null;
                 let token = null;
 
-                // Check for token in various locations
                 if (response.token) {
                     token = response.token;
-                    userData = response.user || { email };
-                } else if (response.accessToken) {
-                    token = response.accessToken;
-                    userData = response.user || { email };
-                } else if (response.access_token) {
-                    token = response.access_token;
                     userData = response.user || { email };
                 } else if (response.user?.token) {
                     token = response.user.token;
@@ -370,27 +344,23 @@
                 } else if (response.data?.token) {
                     token = response.data.token;
                     userData = response.data.user || response.user || { email };
-                } else if (response.jwt) {
-                    token = response.jwt;
-                    userData = response.user || { email };
+                } else if (response.data?.user?.token) {
+                    token = response.data.user.token;
+                    userData = response.data.user;
                 } else {
-                    // If no explicit token, but response indicates success
-                    if (response.success || response.status === 'success' || response.message?.includes('success')) {
+                    if (response.success || response.status === 'success') {
                         token = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
                         userData = response.user || response.data || { 
                             email: email,
                             id: response.id || response.userId || Date.now()
                         };
-                        console.log('No explicit token found, creating session token:', token);
                     }
                 }
 
                 if (!token) {
-                    console.error('Token extraction failed. Full response:', response);
                     throw new Error('No authentication token received from server.');
                 }
 
-                // Prepare user session data
                 const sessionData = {
                     token: token,
                     email: userData.email || email,
@@ -399,18 +369,13 @@
                     ...userData
                 };
 
-                console.log('Saving session data:', sessionData);
-
-                // Save session
                 await storage.saveSession(sessionData);
                 currentUser = sessionData;
 
-                // Update UI
                 if (elements.userEmail) {
                     elements.userEmail.textContent = `Welcome, ${sessionData.name}!`;
                 }
 
-                // Show success and redirect
                 utils.showMessage(elements.loginMessage, 'Login successful!', 'success');
                 
                 setTimeout(() => {
@@ -418,8 +383,6 @@
                 }, 1000);
 
             } catch (error) {
-                console.error('Login error:', error);
-                
                 let errorMessage = 'Login failed. Please try again.';
                 
                 if (error.message.includes('fetch')) {
@@ -443,7 +406,6 @@
             }
         },
 
-        // Handle signup
         signup: async (formData) => {
             if (isLoading) return;
             
@@ -453,7 +415,6 @@
 
                 const { name, email, password, confirmPassword } = formData;
 
-                // Validation
                 if (!name.trim()) {
                     throw new Error('Full name is required');
                 }
@@ -470,25 +431,13 @@
                     throw new Error('Passwords do not match');
                 }
 
-                console.log('Attempting signup for:', email);
-
-                // API call
                 const response = await api.signup(name, email, password);
                 
-                console.log('Signup response received:', response);
-
-                // Handle different possible response structures (same logic as login)
                 let userData = null;
                 let token = null;
 
                 if (response.token) {
                     token = response.token;
-                    userData = response.user || { email, name };
-                } else if (response.accessToken) {
-                    token = response.accessToken;
-                    userData = response.user || { email, name };
-                } else if (response.access_token) {
-                    token = response.access_token;
                     userData = response.user || { email, name };
                 } else if (response.user?.token) {
                     token = response.user.token;
@@ -496,27 +445,24 @@
                 } else if (response.data?.token) {
                     token = response.data.token;
                     userData = response.data.user || response.user || { email, name };
-                } else if (response.jwt) {
-                    token = response.jwt;
-                    userData = response.user || { email, name };
+                } else if (response.data?.user?.token) {
+                    token = response.data.user.token;
+                    userData = response.data.user;
                 } else {
-                    if (response.success || response.status === 'success' || response.message?.includes('success')) {
+                    if (response.success || response.status === 'success') {
                         token = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
                         userData = response.user || response.data || { 
                             email: email,
                             name: name,
                             id: response.id || response.userId || Date.now()
                         };
-                        console.log('No explicit token found, creating session token:', token);
                     }
                 }
 
                 if (!token) {
-                    console.error('Token extraction failed. Full response:', response);
                     throw new Error('No authentication token received from server.');
                 }
 
-                // Prepare user session data
                 const sessionData = {
                     token: token,
                     email: userData.email || email,
@@ -525,18 +471,13 @@
                     ...userData
                 };
 
-                console.log('Saving session data:', sessionData);
-
-                // Save session
                 await storage.saveSession(sessionData);
                 currentUser = sessionData;
 
-                // Update UI
                 if (elements.userEmail) {
                     elements.userEmail.textContent = `Welcome, ${sessionData.name}!`;
                 }
 
-                // Show success and redirect
                 utils.showMessage(elements.signupMessage, 'Account created successfully!', 'success');
                 
                 setTimeout(() => {
@@ -544,8 +485,6 @@
                 }, 1000);
 
             } catch (error) {
-                console.error('Signup error:', error);
-                
                 let errorMessage = 'Signup failed. Please try again.';
                 
                 if (error.message.includes('fetch')) {
@@ -569,18 +508,16 @@
             }
         },
 
-        // Handle logout
         logout: async () => {
             try {
                 await storage.clearSession();
                 currentUser = null;
+                currentVideoSaved = false;
                 navigation.showLogin();
                 
-                // Reset forms
                 if (elements.loginFormElement) elements.loginFormElement.reset();
                 if (elements.signupFormElement) elements.signupFormElement.reset();
                 
-                // Clear messages
                 if (elements.loginMessage) {
                     elements.loginMessage.style.display = 'none';
                     elements.loginMessage.textContent = '';
@@ -591,20 +528,17 @@
                 }
                 
             } catch (error) {
-                console.error('Logout error:', error);
+                // Handle logout errors silently
             }
         }
     };
 
     // Dashboard functionality
     const dashboard = {
-        // Load user stats
         loadStats: async () => {
             try {
                 const response = await api.getStats();
-                console.log('Stats response:', response);
                 
-                // Handle different response structures
                 let savedCount = 0;
                 let approvedCount = 0;
 
@@ -623,32 +557,59 @@
                 utils.animateCounter(elements.approvedCount, approvedCount);
                 
             } catch (error) {
-                console.error('Failed to load stats:', error);
                 if (elements.savedCount) elements.savedCount.textContent = '0';
                 if (elements.approvedCount) elements.approvedCount.textContent = '0';
             }
         },
 
-        // Update current page info
         updateCurrentPageInfo: async () => {
             try {
                 if (typeof chrome !== 'undefined' && chrome.tabs) {
                     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
                     currentTab = tabs[0];
                     
-                    if (currentTab?.url?.includes('youtube.com/watch')) {
-                        elements.currentPageInfo.textContent = 'YouTube video detected! Click to save this video.';
-                        if (elements.saveCurrentBtn) elements.saveCurrentBtn.disabled = false;
+                    if (currentTab?.url && utils.isYouTubeVideoUrl(currentTab.url)) {
+                        // Check if video is already saved
+                        const videoId = utils.extractVideoId(currentTab.url);
+                        if (videoId) {
+                            try {
+                                const checkResponse = await api.checkVideoSaved(videoId);
+                                currentVideoSaved = checkResponse.status === 'success' && checkResponse.data?.exists;
+                            } catch (error) {
+                                currentVideoSaved = false;
+                            }
+                        }
+
+                        if (currentVideoSaved) {
+                            elements.currentPageInfo.textContent = 'This video is already saved in your collection!';
+                            elements.currentPageInfo.style.color = '#90EE90';
+                            if (elements.saveCurrentBtn) {
+                                elements.saveCurrentBtn.innerHTML = '<span>Already Saved</span>';
+                                elements.saveCurrentBtn.disabled = true;
+                                elements.saveCurrentBtn.style.background = 'rgba(30, 80, 30, 0.8)';
+                            }
+                        } else {
+                            elements.currentPageInfo.textContent = 'YouTube video detected! Click to save this video.';
+                            elements.currentPageInfo.style.color = '';
+                            if (elements.saveCurrentBtn) {
+                                elements.saveCurrentBtn.innerHTML = '<span>Save Current Video</span>';
+                                elements.saveCurrentBtn.disabled = false;
+                                elements.saveCurrentBtn.style.background = '';
+                            }
+                        }
                     } else {
                         elements.currentPageInfo.textContent = 'Navigate to a YouTube video to save it';
-                        if (elements.saveCurrentBtn) elements.saveCurrentBtn.disabled = true;
+                        elements.currentPageInfo.style.color = '';
+                        if (elements.saveCurrentBtn) {
+                            elements.saveCurrentBtn.disabled = true;
+                            elements.saveCurrentBtn.style.background = '';
+                        }
                     }
                 } else {
                     elements.currentPageInfo.textContent = 'Navigate to a YouTube video to save it';
                     if (elements.saveCurrentBtn) elements.saveCurrentBtn.disabled = true;
                 }
             } catch (error) {
-                console.error('Failed to get current tab:', error);
                 if (elements.currentPageInfo) {
                     elements.currentPageInfo.textContent = 'Navigate to a YouTube video to save it';
                 }
@@ -656,18 +617,15 @@
             }
         },
 
-        // Save current video
         saveCurrentVideo: async () => {
-            if (isLoading || !currentTab?.url) return;
+            if (isLoading || !currentTab?.url || currentVideoSaved) return;
             
             try {
                 isLoading = true;
                 utils.setLoading(elements.saveCurrentBtn, true, 'Saving...');
 
                 const response = await api.saveCurrentVideo(currentTab.url);
-                console.log('Save video response:', response);
                 
-                // Handle different response structures
                 const isSuccess = response && (
                     response.status === 'success' || 
                     response.success === true ||
@@ -676,20 +634,25 @@
                 );
 
                 if (isSuccess) {
+                    currentVideoSaved = true;
                     if (elements.currentPageInfo) {
                         elements.currentPageInfo.textContent = 'Video saved successfully!';
                         elements.currentPageInfo.style.color = '#00ff00';
-                        setTimeout(() => {
-                            elements.currentPageInfo.style.color = '';
-                        }, 3000);
                     }
+                    
+                    // Update button to show saved state
+                    if (elements.saveCurrentBtn) {
+                        elements.saveCurrentBtn.innerHTML = '<span>Already Saved</span>';
+                        elements.saveCurrentBtn.disabled = true;
+                        elements.saveCurrentBtn.style.background = 'rgba(30, 80, 30, 0.8)';
+                    }
+                    
                     dashboard.loadStats(); // Refresh stats
                 } else {
                     throw new Error(response?.message || response?.error || 'Failed to save video');
                 }
 
             } catch (error) {
-                console.error('Failed to save video:', error);
                 if (elements.currentPageInfo) {
                     elements.currentPageInfo.textContent = error.message;
                     elements.currentPageInfo.style.color = '#ff0000';
@@ -700,21 +663,21 @@
                 }
             } finally {
                 isLoading = false;
-                utils.setLoading(elements.saveCurrentBtn, false);
+                if (!currentVideoSaved) {
+                    utils.setLoading(elements.saveCurrentBtn, false);
+                }
             }
         }
     };
 
     // Event listeners
     const setupEventListeners = () => {
-        // Store original button texts
         Object.values(elements).forEach(element => {
             if (element?.tagName === 'BUTTON') {
                 utils.storeOriginalButtonText(element);
             }
         });
 
-        // Navigation buttons
         if (elements.showSignupBtn) {
             elements.showSignupBtn.addEventListener('click', navigation.showSignup);
         }
@@ -725,7 +688,6 @@
             elements.logoutBtn.addEventListener('click', auth.logout);
         }
 
-        // Form submissions
         if (elements.loginFormElement) {
             elements.loginFormElement.addEventListener('submit', async (e) => {
                 e.preventDefault();
@@ -742,12 +704,10 @@
             });
         }
 
-        // Dashboard actions
         if (elements.saveCurrentBtn) {
             elements.saveCurrentBtn.addEventListener('click', dashboard.saveCurrentVideo);
         }
 
-        // Real-time password confirmation validation
         const confirmPasswordInput = document.getElementById('confirmPassword');
         const signupPasswordInput = document.getElementById('signupPassword');
         
@@ -765,20 +725,13 @@
     // Initialization
     const init = async () => {
         try {
-            console.log('Initializing popup...');
-            
-            // Check if required elements exist
             if (!checkRequiredElements()) {
-                console.error('Required elements missing. Cannot initialize.');
                 return;
             }
             
-            // Setup event listeners
             setupEventListeners();
             
-            // Check existing session
             const userSession = await storage.getSession();
-            console.log('Existing session:', userSession);
             
             if (userSession?.token) {
                 currentUser = userSession;
@@ -790,10 +743,7 @@
                 navigation.showLogin();
             }
             
-            console.log('Popup initialized successfully');
-            
         } catch (error) {
-            console.error('Initialization error:', error);
             navigation.showLogin();
         }
     };

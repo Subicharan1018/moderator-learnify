@@ -6,7 +6,8 @@
     const CONFIG = {
         backendUrl: 'http://localhost:3000',
         endpoints: {
-            saveLink: '/save-link'
+            saveLink: '/save-link',
+            checkVideo: '/check-video'
         }
     };
 
@@ -15,13 +16,7 @@
 
     // Utility functions
     const utils = {
-        // Log with timestamp
-        log: (message, data = null) => {
-            const timestamp = new Date().toISOString();
-            console.log(`[${timestamp}] Background:`, message, data || '');
-        },
-
-        // Handle storage operations with error handling
+        // Storage operations with error handling
         getStorage: (keys) => {
             return new Promise((resolve, reject) => {
                 try {
@@ -47,6 +42,19 @@
                        urlObj.searchParams.has('v');
             } catch {
                 return false;
+            }
+        },
+
+        // Extract video ID
+        extractVideoId: (url) => {
+            try {
+                const urlObj = new URL(url);
+                if (urlObj.hostname === 'youtu.be') {
+                    return urlObj.pathname.slice(1);
+                }
+                return urlObj.searchParams.get('v');
+            } catch {
+                return null;
             }
         },
 
@@ -78,8 +86,6 @@
                     ...options.headers
                 };
 
-                utils.log('Making API request', { endpoint, method: options.method || 'GET' });
-
                 const response = await fetch(`${CONFIG.backendUrl}${endpoint}`, {
                     ...options,
                     headers
@@ -91,11 +97,9 @@
                     throw new Error(data.message || `HTTP error! status: ${response.status}`);
                 }
 
-                utils.log('API request successful', { endpoint, status: response.status });
                 return data;
 
             } catch (error) {
-                utils.log('API request failed', { endpoint, error: error.message });
                 throw error;
             }
         },
@@ -105,6 +109,13 @@
             return api.makeRequest(CONFIG.endpoints.saveLink, {
                 method: 'POST',
                 body: JSON.stringify({ url })
+            });
+        },
+
+        // Check if video is already saved
+        checkVideo: async (videoId) => {
+            return api.makeRequest(`/user/videos/check/${videoId}`, {
+                method: 'GET'
             });
         }
     };
@@ -131,8 +142,6 @@
                     throw new Error('Invalid YouTube URL');
                 }
 
-                utils.log('Processing save link request', { url });
-
                 // Check user authentication
                 const { userSession } = await utils.getStorage(['userSession']);
                 
@@ -144,11 +153,6 @@
                 const response = await api.saveLink(url);
                 
                 if (response.status === 'success') {
-                    utils.log('Video saved successfully', { 
-                        videoId: response.data?.video_id,
-                        title: response.data?.title 
-                    });
-                    
                     sendResponse(utils.createResponse(
                         'success', 
                         response.message || 'Video saved successfully!',
@@ -159,8 +163,6 @@
                 }
 
             } catch (error) {
-                utils.log('Save link error', { error: error.message });
-                
                 let errorMessage = error.message;
                 if (error.message.includes('fetch')) {
                     errorMessage = 'Unable to connect to server. Please ensure the backend is running.';
@@ -180,15 +182,12 @@
                 const { userSession } = await utils.getStorage(['userSession']);
                 const isAuthenticated = !!(userSession?.token);
                 
-                utils.log('Auth check', { authenticated: isAuthenticated, user: userSession?.email });
-                
                 sendResponse({
                     authenticated: isAuthenticated,
                     user: userSession || null
                 });
 
             } catch (error) {
-                utils.log('Auth check error', { error: error.message });
                 sendResponse({
                     authenticated: false,
                     user: null
@@ -196,12 +195,40 @@
             }
         },
 
+        // Handle video status check
+        checkVideoStatus: async (request, sender, sendResponse) => {
+            try {
+                const { url } = request;
+                const videoId = utils.extractVideoId(url);
+                
+                if (!videoId) {
+                    sendResponse(utils.createResponse('error', 'Invalid video URL'));
+                    return;
+                }
+
+                const { userSession } = await utils.getStorage(['userSession']);
+                
+                if (!userSession?.token) {
+                    sendResponse(utils.createResponse('error', 'Not authenticated'));
+                    return;
+                }
+
+                const response = await api.checkVideo(videoId);
+                sendResponse(utils.createResponse('success', 'Video status checked', {
+                    isSaved: response.status === 'success' && response.data?.exists,
+                    videoData: response.data
+                }));
+
+            } catch (error) {
+                sendResponse(utils.createResponse('success', 'Video not saved', {
+                    isSaved: false
+                }));
+            }
+        },
+
         // Handle popup open requests
         openPopup: async (request, sender, sendResponse) => {
             try {
-                utils.log('Opening popup for authentication');
-                
-                // Use chrome.action.openPopup() for Manifest V3
                 if (chrome.action && chrome.action.openPopup) {
                     await chrome.action.openPopup();
                     sendResponse(utils.createResponse('success', 'Popup opened'));
@@ -210,7 +237,6 @@
                 }
 
             } catch (error) {
-                utils.log('Error opening popup', { error: error.message });
                 sendResponse(utils.createResponse('error', 'Failed to open popup. Please click the extension icon.'));
             }
         }
@@ -219,74 +245,51 @@
     // Main message listener
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         try {
-            utils.log('Received message', { action: request.action, sender: sender.tab?.url });
-
             const handler = messageHandlers[request.action];
             
             if (handler) {
-                // Execute handler asynchronously
                 handler(request, sender, sendResponse);
                 return true; // Keep message channel open for async response
             } else {
-                utils.log('Unknown action received', { action: request.action });
                 sendResponse(utils.createResponse('error', `Unknown action: ${request.action}`));
             }
 
         } catch (error) {
-            utils.log('Message handler error', { error: error.message });
             sendResponse(utils.createResponse('error', 'Internal error processing request'));
         }
     });
 
-    // Handle extension startup
-    chrome.runtime.onStartup.addListener(() => {
-        utils.log('Extension started');
-    });
-
     // Handle extension installation
     chrome.runtime.onInstalled.addListener((details) => {
-        utils.log('Extension installed/updated', { reason: details.reason });
-        
         if (details.reason === 'install') {
-            // Set default settings or show welcome message
-            utils.log('First time installation');
-        } else if (details.reason === 'update') {
-            utils.log('Extension updated', { 
-                previousVersion: details.previousVersion,
-                currentVersion: chrome.runtime.getManifest().version 
-            });
+            // Set default settings on first install
         }
     });
 
-    // Handle tab updates (optional - for future features)
+    // Handle tab updates for video status checking
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-        // Only process when tab is completely loaded and is a YouTube watch page
         if (changeInfo.status === 'complete' && 
             tab.url && 
             utils.isValidYouTubeUrl(tab.url)) {
             
-            utils.log('YouTube video page loaded', { tabId, url: tab.url });
-            
-            // Could potentially inject content script here if needed
-            // or perform other tab-specific operations
+            // Notify content script that page is ready
+            chrome.tabs.sendMessage(tabId, {
+                action: 'pageReady',
+                url: tab.url
+            }).catch(() => {
+                // Ignore errors if content script is not ready
+            });
         }
     });
 
     // Global error handler
     self.addEventListener('error', (event) => {
-        utils.log('Global error', { 
-            message: event.message, 
-            filename: event.filename, 
-            lineno: event.lineno 
-        });
+        // Handle errors silently in production
     });
 
     // Unhandled promise rejection handler
     self.addEventListener('unhandledrejection', (event) => {
-        utils.log('Unhandled promise rejection', { reason: event.reason });
-        event.preventDefault(); // Prevent the default browser behavior
+        event.preventDefault();
     });
-
-    utils.log('Background script initialized successfully');
 
 })();
