@@ -1,4 +1,4 @@
-// server.js - Using Python yt-dlp directly
+// server.js - Enhanced to store data in specific JSON format
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
@@ -154,7 +154,7 @@ UserSchema.index({ isActive: 1 });
 
 const User = mongoose.model('User', UserSchema);
 
-// --- Video Schema ---
+// --- Enhanced Video Schema matching your JSON format ---
 const VideoSchema = new mongoose.Schema({
   video_id: { 
     type: String, 
@@ -174,10 +174,6 @@ const VideoSchema = new mongoose.Schema({
   embed_url: { 
     type: String, 
     required: true 
-  },
-  embed_iframe: { 
-    type: String, 
-    default: '' 
   },
   thumbnail: { 
     type: String, 
@@ -203,7 +199,7 @@ const VideoSchema = new mongoose.Schema({
     type: String, 
     required: true, 
     default: 'No description available',
-    maxlength: [5000, 'Description too long']
+    maxlength: [10000, 'Description too long']
   },
   channel: {
     name: { type: String, required: true, default: 'Unknown Channel' },
@@ -219,12 +215,13 @@ const VideoSchema = new mongoose.Schema({
   },
   age_rating: { 
     type: String, 
-    default: 'N/A' 
+    default: 'G' 
   },
   content_flags: {
     violence: { type: Boolean, default: false },
     explicit_language: { type: Boolean, default: false },
-    sensitive_topics: { type: Boolean, default: false }
+    sensitive_topics: { type: Boolean, default: false },
+    adult_content: { type: Boolean, default: false }
   },
   likes: { type: Number, default: 0 },
   dislikes: { type: Number, default: 0 },
@@ -242,35 +239,20 @@ const VideoSchema = new mongoose.Schema({
   approved: { type: Boolean, default: true },
   approved_by: { type: String, default: null },
   approved_at: { type: Date, default: null },
+  last_updated: { type: Date, default: Date.now },
+  status: { type: String, default: 'active' },
+  __v: { type: Number, default: 1 },
+  reportCount: { type: Number, default: 0 },
+  reports: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  updatedAt: { type: Date, default: Date.now },
   saved_by: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User', 
     required: false
-  },
-  last_updated: { type: Date, default: Date.now },
-  player_settings: {
-    autoplay: { type: Boolean, default: false },
-    controls: { type: Boolean, default: true },
-    modestbranding: { type: Boolean, default: true },
-    rel: { type: Number, default: 0 },
-    enablejsapi: { type: Number, default: 1 }
-  },
-  safety_overrides: {
-    disable_comments: { type: Boolean, default: true },
-    hide_suggestions: { type: Boolean, default: true },
-    block_annotations: { type: Boolean, default: true }
-  },
-  restrictions: {
-    block_seek: { type: Boolean, default: false },
-    force_captions: { type: Boolean, default: false },
-    lock_quality: {
-      type: String,
-      enum: ['hd720', 'hd1080', 'highres', 'default', null],
-      default: 'hd720'
-    }
   }
 }, { 
-  timestamps: true 
+  timestamps: true,
+  versionKey: '__v'
 });
 
 // Compound indexes
@@ -379,7 +361,6 @@ const utils = {
         
         if (code === 0) {
           try {
-            // Parse the JSON output
             const lines = stdout.trim().split('\n');
             const jsonLine = lines.find(line => line.startsWith('{'));
             
@@ -411,7 +392,6 @@ const utils = {
             stdout: stdout.substring(0, 200) + '...'
           });
           
-          // Check for common error patterns
           if (stderr.includes('Video unavailable')) {
             reject(new Error('Video is unavailable or private'));
           } else if (stderr.includes('age-restricted')) {
@@ -439,13 +419,31 @@ const utils = {
     });
   },
 
-  // Safe number formatting
-  formatNumber: (num) => {
-    if (!num || isNaN(num)) return '0';
-    return parseInt(num).toLocaleString();
+  // Safe number formatting - return as string with suffix
+  formatViews: (num) => {
+    if (!num || isNaN(num)) return '0 views';
+    const count = parseInt(num);
+    if (count >= 1000000) {
+      return `${(count / 1000000).toFixed(1)}M views`;
+    } else if (count >= 1000) {
+      return `${(count / 1000).toFixed(1)}K views`;
+    }
+    return `${count} views`;
   },
 
-  // Safe date formatting
+  // Format subscribers count
+  formatSubscribers: (num) => {
+    if (!num || isNaN(num)) return '0';
+    const count = parseInt(num);
+    if (count >= 1000000) {
+      return `${(count / 1000000).toFixed(1)}M`;
+    } else if (count >= 1000) {
+      return `${(count / 1000).toFixed(1)}K`;
+    }
+    return count.toString();
+  },
+
+  // Safe date formatting to match your format (YYYY-MM-DD)
   formatUploadDate: (dateString) => {
     if (!dateString) return new Date().toISOString().split('T')[0];
     
@@ -467,19 +465,91 @@ const utils = {
     return new Date().toISOString().split('T')[0];
   },
 
-  // Get best thumbnail URL
-  getBestThumbnail: (thumbnails) => {
+  // Get best thumbnail URL (prioritize webp format like in your example)
+  getBestThumbnail: (thumbnails, videoId) => {
     if (!thumbnails || !Array.isArray(thumbnails) || thumbnails.length === 0) {
-      return 'https://via.placeholder.com/320x180?text=No+Thumbnail';
+      // Return default YouTube thumbnail format
+      return `https://i.ytimg.com/vi_webp/${videoId}/maxresdefault.webp`;
     }
 
-    // Sort by resolution (width * height) descending
+    // Look for maxresdefault webp first (matching your format)
+    const webpThumb = thumbnails.find(thumb => 
+      thumb.url && thumb.url.includes('maxresdefault.webp')
+    );
+    if (webpThumb) return webpThumb.url;
+
+    // Sort by resolution descending
     const sortedThumbnails = thumbnails
       .filter(thumb => thumb.url && thumb.width && thumb.height)
       .sort((a, b) => (b.width * b.height) - (a.width * a.height));
 
-    // Return the highest resolution thumbnail, or the first available one
-    return sortedThumbnails[0]?.url || thumbnails[0]?.url || 'https://via.placeholder.com/320x180?text=No+Thumbnail';
+    return sortedThumbnails[0]?.url || `https://i.ytimg.com/vi_webp/${videoId}/maxresdefault.webp`;
+  },
+
+  // Extract age rating from yt-dlp metadata
+  getAgeRating: (metadata) => {
+    if (metadata.age_limit) {
+      if (metadata.age_limit >= 18) return 'R';
+      if (metadata.age_limit >= 13) return 'PG-13';
+      if (metadata.age_limit > 0) return 'PG';
+    }
+    
+    // Check for content indicators in description and title
+    const description = (metadata.description || '').toLowerCase();
+    const title = (metadata.title || '').toLowerCase();
+    const combined = `${description} ${title}`;
+    
+    if (combined.includes('mature content') || combined.includes('18+') || combined.includes('adult')) {
+      return 'R';
+    }
+    if (combined.includes('mature') || combined.includes('teen') || combined.includes('13+')) {
+      return 'PG-13';
+    }
+    if (combined.includes('parental guidance') || combined.includes('mild')) {
+      return 'PG';
+    }
+    
+    return 'G'; // Default general audience rating
+  },
+
+  // Analyze content for flags
+  analyzeContentFlags: (metadata) => {
+    const description = (metadata.description || '').toLowerCase();
+    const title = (metadata.title || '').toLowerCase();
+    const tags = (metadata.tags || []).join(' ').toLowerCase();
+    const combined = `${description} ${title} ${tags}`;
+
+    return {
+      violence: combined.includes('violence') || combined.includes('violent') || 
+               combined.includes('fight') || combined.includes('war') ||
+               combined.includes('blood') || combined.includes('combat'),
+      explicit_language: combined.includes('explicit') || combined.includes('profanity') || 
+                        combined.includes('strong language') || metadata.age_limit >= 18,
+      sensitive_topics: combined.includes('controversy') || combined.includes('sensitive') ||
+                       combined.includes('politics') || combined.includes('religion') ||
+                       combined.includes('discrimination') || combined.includes('hate'),
+      adult_content: metadata.age_limit >= 18 || combined.includes('adult') || 
+                    combined.includes('mature') || combined.includes('18+') ||
+                    combined.includes('nsfw') || combined.includes('sexual') ||
+                    combined.includes('nudity') || combined.includes('pornography')
+    };
+  },
+
+  // Set approval data helper
+  setApprovalData: (isApproved, userId, userEmail) => {
+    if (isApproved) {
+      return {
+        approved: true,
+        approved_by: userId ? `user@${userEmail || 'unknown'}` : 'system@auto',
+        approved_at: new Date()
+      };
+    } else {
+      return {
+        approved: false,
+        approved_by: null,
+        approved_at: null
+      };
+    }
   }
 };
 
@@ -913,7 +983,7 @@ app.get('/user/videos', authenticateToken, async (req, res) => {
   }
 });
 
-// MAIN SAVE LINK ENDPOINT
+// MAIN SAVE LINK ENDPOINT - Enhanced to match your JSON format
 app.post('/save-link', async (req, res) => {
   try {
     const { url } = req.body;
@@ -996,25 +1066,42 @@ app.post('/save-link', async (req, res) => {
     // Format duration
     const durationFormatted = utils.formatDuration(metadata.duration);
 
-    // Get best thumbnail
-    const thumbnailUrl = utils.getBestThumbnail(metadata.thumbnails);
+    // Get best thumbnail (prioritizing webp format like your example)
+    const thumbnailUrl = utils.getBestThumbnail(metadata.thumbnails, videoId);
 
-    // Prepare video data with user association
+    // Analyze content for flags
+    const contentFlags = utils.analyzeContentFlags(metadata);
+
+    // Extract and format chapters if available
+    const chapters = [];
+    if (Array.isArray(metadata.chapters) && metadata.chapters.length > 0) {
+      metadata.chapters.forEach(chapter => {
+        chapters.push({
+          title: chapter.title || 'Untitled Chapter',
+          start_time: Math.floor(chapter.start_time || 0),
+          end_time: Math.floor(chapter.end_time || 0)
+        });
+      });
+    }
+
+    // Get approval data
+    const approvalData = utils.setApprovalData(true, userId, req.user?.email);
+
+    // Prepare video data in the exact format from your JSON example
     const videoData = {
       video_id: videoId,
       title: utils.sanitizeText(metadata.title || 'Unknown Title', 500),
       url: metadata.webpage_url || url,
       embed_url: `https://www.youtube.com/embed/${videoId}`,
-      embed_iframe: `<iframe width="560" height="315" src="https://www.youtube.com/embed/${videoId}" frameborder="0" allowfullscreen></iframe>`,
       thumbnail: thumbnailUrl,
       duration: durationFormatted,
-      views: utils.formatNumber(metadata.view_count),
+      views: utils.formatViews(metadata.view_count),
       upload_date: utils.formatUploadDate(metadata.upload_date),
-      description: utils.sanitizeText(metadata.description || 'No description available', 5000),
+      description: utils.sanitizeText(metadata.description || 'No description available', 10000),
       channel: {
         name: utils.sanitizeText(metadata.uploader || metadata.channel || 'Unknown Channel', 200),
-        url: metadata.uploader_url || metadata.channel_url || '#',
-        subscribers: utils.formatNumber(metadata.channel_follower_count || metadata.subscriber_count),
+        url: metadata.uploader_url || metadata.channel_url || `https://www.youtube.com/channel/${metadata.channel_id || 'unknown'}`,
+        subscribers: utils.formatSubscribers(metadata.channel_follower_count || metadata.subscriber_count || 0),
         verified: metadata.channel_is_verified || false,
         logo: metadata.uploader_avatar || 
               (metadata.channel_thumbnails && metadata.channel_thumbnails[0] && metadata.channel_thumbnails[0].url) ||
@@ -1022,22 +1109,23 @@ app.post('/save-link', async (req, res) => {
       },
       category: Array.isArray(metadata.categories) && metadata.categories.length > 0 
                 ? metadata.categories.slice(0, 5) 
-                : ['Uncategorized'],
-      age_rating: metadata.age_limit && metadata.age_limit > 0 ? `${metadata.age_limit}+` : 'N/A',
-      likes: metadata.like_count || 0,
-      comment_count: metadata.comment_count || 0,
+                : ['Science & Technology'], // Default like in your example
+      age_rating: utils.getAgeRating(metadata),
+      content_flags: contentFlags,
+      likes: parseInt(metadata.like_count) || 0,
+      dislikes: 0, // YouTube removed dislikes, so default to 0
       comments_enabled: (metadata.comment_count || 0) > 0,
-      tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 20) : [],
-      chapters: Array.isArray(metadata.chapters) ? metadata.chapters.map(chapter => ({
-        title: chapter.title || 'Untitled Chapter',
-        start_time: chapter.start_time || 0,
-        end_time: chapter.end_time || 0
-      })) : [],
-      saved_by: userId || undefined,
-      approved: userId ? false : true,
-      approved_by: userId ? null : 'system',
-      approved_at: userId ? null : new Date(),
-      last_updated: new Date()
+      comment_count: parseInt(metadata.comment_count) || 0,
+      tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 30) : [],
+      chapters: chapters,
+      ...approvalData,
+      last_updated: new Date(),
+      status: 'active',
+      __v: 1,
+      reportCount: 0,
+      reports: [],
+      updatedAt: new Date(),
+      saved_by: userId || undefined
     };
 
     const savedVideo = new Video(videoData);
@@ -1362,6 +1450,112 @@ app.get('/user/videos/search/:query', authenticateToken, async (req, res) => {
   }
 });
 
+// Get all videos (public endpoint for viewing saved videos)
+app.get('/videos', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
+    const category = req.query.category;
+    const search = req.query.search;
+
+    let filter = { approved: true, status: 'active' };
+    
+    // Add category filter if provided
+    if (category && category !== 'all') {
+      filter.category = { $in: [new RegExp(category, 'i')] };
+    }
+
+    // Add search filter if provided
+    if (search && search.trim().length >= 2) {
+      const searchRegex = new RegExp(search.trim(), 'i');
+      filter.$or = [
+        { title: searchRegex },
+        { description: searchRegex },
+        { 'channel.name': searchRegex },
+        { tags: { $in: [searchRegex] } }
+      ];
+    }
+
+    const [videos, total] = await Promise.all([
+      Video.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select('-saved_by -reports') // Hide sensitive info
+        .lean(),
+      Video.countDocuments(filter)
+    ]);
+
+    logger.info('Public videos retrieved', { 
+      count: videos.length,
+      total,
+      page,
+      category,
+      search: search ? search.substring(0, 50) : null
+    });
+
+    res.status(200).json(
+      utils.createResponse('success', 'Videos retrieved successfully', {
+        videos,
+        pagination: {
+          current: page,
+          total: Math.ceil(total / limit),
+          count: videos.length,
+          totalVideos: total
+        },
+        filters: {
+          category: category || 'all',
+          search: search || null
+        }
+      })
+    );
+
+  } catch (error) {
+    logger.error('Error fetching public videos:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to fetch videos')
+    );
+  }
+});
+
+// Get video by ID (public endpoint)
+app.get('/videos/:videoId', async (req, res) => {
+  try {
+    const { videoId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(videoId)) {
+      return res.status(400).json(
+        utils.createResponse('error', 'Invalid video ID format')
+      );
+    }
+
+    const video = await Video.findOne({ 
+      _id: videoId, 
+      approved: true, 
+      status: 'active' 
+    })
+    .select('-saved_by -reports') // Hide sensitive info
+    .lean();
+
+    if (!video) {
+      return res.status(404).json(
+        utils.createResponse('error', 'Video not found')
+      );
+    }
+
+    res.status(200).json(
+      utils.createResponse('success', 'Video details retrieved successfully', video)
+    );
+
+  } catch (error) {
+    logger.error('Error fetching public video details:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to fetch video details')
+    );
+  }
+});
+
 // Admin Routes
 app.get('/admin/stats', authenticateToken, async (req, res) => {
   try {
@@ -1371,16 +1565,18 @@ app.get('/admin/stats', authenticateToken, async (req, res) => {
       );
     }
 
-    const [userCount, videoCount, approvedVideoCount] = await Promise.all([
+    const [userCount, videoCount, approvedVideoCount, activeVideoCount] = await Promise.all([
       User.countDocuments({ isActive: true }),
       Video.countDocuments(),
-      Video.countDocuments({ approved: true })
+      Video.countDocuments({ approved: true }),
+      Video.countDocuments({ status: 'active' })
     ]);
 
     const stats = {
       totalUsers: userCount,
       totalVideos: videoCount,
       approvedVideos: approvedVideoCount,
+      activeVideos: activeVideoCount,
       pendingApproval: videoCount - approvedVideoCount
     };
 
@@ -1392,6 +1588,61 @@ app.get('/admin/stats', authenticateToken, async (req, res) => {
     logger.error('Error fetching admin stats:', error);
     res.status(500).json(
       utils.createResponse('error', 'Failed to fetch admin statistics')
+    );
+  }
+});
+
+// Admin: Get all videos with user info
+app.get('/admin/videos', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json(
+        utils.createResponse('error', 'Admin access required')
+      );
+    }
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+    const status = req.query.status;
+    const approved = req.query.approved;
+
+    let filter = {};
+    
+    if (status) {
+      filter.status = status;
+    }
+    
+    if (approved !== undefined) {
+      filter.approved = approved === 'true';
+    }
+
+    const [videos, total] = await Promise.all([
+      Video.find(filter)
+        .populate('saved_by', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Video.countDocuments(filter)
+    ]);
+
+    res.status(200).json(
+      utils.createResponse('success', 'Admin videos retrieved successfully', {
+        videos,
+        pagination: {
+          current: page,
+          total: Math.ceil(total / limit),
+          count: videos.length,
+          totalVideos: total
+        }
+      })
+    );
+
+  } catch (error) {
+    logger.error('Error fetching admin videos:', error);
+    res.status(500).json(
+      utils.createResponse('error', 'Failed to fetch admin videos')
     );
   }
 });
@@ -1571,40 +1822,48 @@ const startServer = async () => {
       
       console.log('\n🚀 YouTube Link Saver API Server Started');
       console.log('📋 Available endpoints:');
+      console.log('  === Public Endpoints ===');
       console.log('  - GET  /health              - Health check');
       console.log('  - GET  /test                - Test endpoint');
       console.log('  - GET  /test-ytdlp          - Test yt-dlp installation');
+      console.log('  - POST /save-link           - Save YouTube video');
+      console.log('  - GET  /videos              - Get all public videos');
+      console.log('  - GET  /videos/:id          - Get public video details');
+      console.log('  === Authentication ===');
       console.log('  - POST /auth/signup         - User registration');
       console.log('  - POST /auth/login          - User login');
       console.log('  - GET  /auth/validate       - Validate token');
-      console.log('  - POST /save-link           - Save YouTube video');
+      console.log('  === User Endpoints (Auth Required) ===');
       console.log('  - GET  /user/stats          - Get user statistics');
       console.log('  - GET  /user/videos         - Get user\'s saved videos');
-      console.log('  - GET  /user/videos/:id     - Get video details');
-      console.log('  - DELETE /user/videos/:id   - Delete user\'s video');
-      console.log('  - GET  /user/videos/search/:query - Search videos');
+      console.log('  - GET  /user/videos/:id     - Get user\'s video details');
+      console.log('  - POST /user/videos/search/:query - Search user\'s videos');
+      console.log('  - DELETE /user/videos/:videoId - Delete user\'s video');
       console.log('  - PUT  /user/profile        - Update user profile');
       console.log('  - PUT  /user/password       - Change user password');
-      console.log('  - GET  /admin/stats         - Admin statistics');
-      if (NODE_ENV === 'development') {
-        console.log('  - POST /debug-auth          - Debug authentication (dev only)');
+      console.log('  === Admin Endpoints (Admin Role Required) ===');
+      console.log('  - GET  /admin/stats         - Get admin statistics');
+      console.log('  - GET  /admin/videos        - Get all videos with user info');
+      console.log('\n⚙️  Configuration:');
+      console.log(`  - Environment: ${NODE_ENV}`);
+      console.log(`  - Port: ${port}`);
+      console.log(`  - MongoDB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '❌ Disconnected'}`);
+      console.log(`  - yt-dlp: ${dependenciesOk ? '✅ Installed' : '❌ Not installed'}`);
+      console.log(`  - JWT Secret: ${JWT_SECRET.length > 10 ? '✅ Configured' : '⚠️  Using default'}`);
+      console.log('\n📝 Notes:');
+      console.log('  - All authenticated endpoints require "Authorization: Bearer <token>" header');
+      console.log('  - Rate limiting is active (adjust limits in production)');
+      console.log('  - CORS is configured for development and chrome extensions');
+      if (!dependenciesOk) {
+        console.log('  - ⚠️  Install yt-dlp to enable video metadata extraction');
       }
-      console.log(`\n🔗 Server running on: http://localhost:${port}`);
-      console.log(`📊 Environment: ${NODE_ENV}`);
-      console.log(`🗄️  Database: ${MONGO_URI}`);
-      console.log(`🔐 JWT Secret: ${JWT_SECRET.substring(0, 20)}...`);
-      
-      if (dependenciesOk) {
-        console.log(`✅ yt-dlp: Installed and ready`);
-      } else {
-        console.log(`⚠️  yt-dlp: Not installed - install with 'pip install yt-dlp'`);
-      }
-      
-      console.log('\n✅ Ready to accept requests!');
+      console.log('\n🔗 Quick test:');
+      console.log(`  curl http://localhost:${port}/health`);
+      console.log('');
     });
 
     global.server = server;
-    
+
   } catch (error) {
     logger.error('Failed to start server:', error);
     process.exit(1);
@@ -1612,4 +1871,7 @@ const startServer = async () => {
 };
 
 // Start the server
-startServer();
+startServer().catch(error => {
+  logger.error('Startup error:', error);
+  process.exit(1);
+});
