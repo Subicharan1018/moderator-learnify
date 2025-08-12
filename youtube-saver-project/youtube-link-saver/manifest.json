@@ -25,7 +25,17 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "YouTube Link Saver"
+    "default_title": "YouTube Link Saver",
+    "default_icon": {
+      "16": "generated-image.png",
+      "48": "generated-image.png",
+      "128": "generated-image.png"
+    }
+  },
+  "icons": {
+    "16": "generated-image.png",
+    "48": "generated-image.png",
+    "128": "generated-image.png"
   },
   "web_accessible_resources": [
     {

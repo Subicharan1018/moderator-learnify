@@ -17,7 +17,7 @@ const execAsync = promisify(exec);
 
 // --- Environment Variables ---
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/youtube-links';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/youtube-saver';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
 
